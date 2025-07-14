@@ -237,8 +237,6 @@ class SignalDetector:
                 SELECT COUNT(*) 
                 FROM tran_TF 
                 WHERE symbol = ? 
-                AND status = 2 
-                AND binance_order_id = 'PENDING'
                 AND timestamp >= ?
             """, (symbol, candle_timestamp))
             row = cursor.fetchone()
