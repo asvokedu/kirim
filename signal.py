@@ -129,7 +129,7 @@ class SignalDetector:
             return None
 
     def _update_aset_table(self, symbol: str, position: str, score: int, 
-                          liquidation_buy: float, liquidation_sell: float):
+                          liq_buy_usd: float, liq_sell_usd: float):
         """Update tabel T_Aset dengan posisi, signal, dan akumulasi likuidasi terbaru"""
         conn = self._get_db_connection()
         if not conn:
@@ -151,7 +151,7 @@ class SignalDetector:
                         liquidation_buy = ?,
                         liquidation_sell = ?
                     WHERE symbol = ?
-                """, (position, score, datetime.utcnow(), liquidation_buy, liquidation_sell, symbol))
+                """, (position, score, datetime.utcnow(), liq_buy_usd, liq_sell_usd, symbol))
             else:
                 # Insert new record
                 cursor.execute("""
@@ -159,10 +159,10 @@ class SignalDetector:
                         symbol, posisi, signal, last_updated, 
                         liquidation_buy, liquidation_sell
                     ) VALUES (?, ?, ?, ?, ?, ?)
-                """, (symbol, position, score, datetime.utcnow(), liquidation_buy, liquidation_sell))
+                """, (symbol, position, score, datetime.utcnow(), liq_buy_usd, liq_sell_usd))
                 
             conn.commit()
-            logger.info(f"Updated T_Aset for {symbol}: {position} ({score}) | LiqBuy: {liquidation_buy:.2f} | LiqSell: {liquidation_sell:.2f}")
+            logger.info(f"Updated T_Aset for {symbol}: {position} ({score}) | LiqBuy: {liq_buy_usd:.2f} | LiqSell: {liq_sell_usd:.2f}")
             return True
         except Exception as e:
             logger.error(f"Gagal update T_Aset untuk {symbol}: {e}")
@@ -860,12 +860,14 @@ class SignalDetector:
 
                         if last_signal != signal or last_score != score:
                             # Perbarui dengan data likuidasi terkini
+                            liq_buy_usd = liquidation_buy * mark_price
+                            liq_sell_usd = liquidation_sell * mark_price
                             self._update_aset_table(
                                 symbol, 
                                 signal, 
                                 score,
-                                liquidation_buy,
-                                liquidation_sell
+                                liq_buy_usd,
+                                liq_sell_usd
                             )
                             self.last_signals[symbol] = signal
                             self.current_scores[symbol] = score
