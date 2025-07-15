@@ -802,9 +802,9 @@ class SignalDetector:
                         liq_buy_usd = liq.get('buy', 0) * mark_price
                         
                         if liq_sell_usd > sell_threshold:  
-                            score -= 3
-                        elif liq_buy_usd > buy_threshold: 
                             score += 3
+                        elif liq_buy_usd > buy_threshold: 
+                            score -= 3
                         
                         # === PENINGKATAN: VOLUME BREAKOUT ===
                         prev_volume = previous_candle_data.get('volume', 0)
