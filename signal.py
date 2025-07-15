@@ -725,7 +725,9 @@ class SignalDetector:
                             # PERBAIKAN: TAAHKAN TANDA SAMA DENGAN (=) DI SINI
                             previous_oi_val = self.previous_oi.get(symbol, 0)
                             funding_rate = d.get('funding_rate', 0)
-                            liq = self.liquidation_accumulator.get(symbol, {})
+                            liq = self.liquidation_accumulator.get(symbol, {'buy': 0.0, 'sell': 0.0})
+                            liquidation_buy = liq.get('buy', 0.0)
+                            liquidation_sell = liq.get('sell', 0.0)
                             vol = self.volume_accumulator.get(symbol, {})
                             order_book = self.order_books.get(symbol, {})
                             burst_threshold = self.burst_thresholds.get(symbol, {'burst_buy_threshold': 50000, 'burst_sell_threshold': 50000})
