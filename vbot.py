@@ -166,8 +166,7 @@ class FuturesTracker:
             return None
 
     def _save_trade_to_db(self, symbol: str, price_open: float, 
-                     position: str, qty: float, leverage: int, binance_order_id: str, 
-                     signal_score: float = 0.0) -> Optional[int]:
+                     position: str, qty: float, leverage: int, binance_order_id: str) -> Optional[int]:
         """Update trade aktif di database: hanya update data dinamis (bukan INSERT)"""
         conn = self._get_db_connection()
         if not conn:
@@ -181,11 +180,16 @@ class FuturesTracker:
             cursor = conn.cursor()
 
             # Cari baris aktif berdasarkan simbol
-            cursor.execute("SELECT id, posisi FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
+            cursor.execute("SELECT id, posisi, signal_score, posisi_ch, signal_ch FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
             row = cursor.fetchone()
 
             if row:
                 row_id = row.id
+                # Simpan data sinyal yang sudah ada
+                signal_score = row.signal_score
+                posisi_ch = row.posisi_ch
+                signal_ch = row.signal_ch
+                
                 # Hitung SL/TP berdasarkan posisi
                 if position == "LONG":
                     stop_loss = price_open * 0.99
@@ -208,13 +212,16 @@ class FuturesTracker:
                         binance_order_id = ?, 
                         status = 1,
                         timestamp = ?,
-                        signal_score = ?
+                        signal_score = ?,   -- JANGAN OVERWRITE, GUNAKAN YANG SUDAH ADA
+                        posisi_ch = ?,      -- JANGAN OVERWRITE
+                        signal_ch = ?       -- JANGAN OVERWRITE
                     WHERE id = ?
                 """
                 params = (
                     price_open, stop_loss, take_profit, fee,
                     qty, leverage, binance_order_id, 
-                    datetime.utcnow(), signal_score,
+                    datetime.utcnow(), 
+                    signal_score, posisi_ch, signal_ch,  # Gunakan data sinyal yang sudah ada
                     row_id
                 )
                 cursor.execute(query, params)
@@ -300,8 +307,9 @@ class FuturesTracker:
             
         try:
             cursor = conn.cursor()
+            # AMBIL DATA SINYAL (posisi_ch, signal_ch) JUGA
             cursor.execute("""
-                SELECT id, symbol, posisi, price_open, qty, leverage, binance_order_id 
+                SELECT id, symbol, posisi, price_open, qty, leverage, binance_order_id, posisi_ch, signal_ch 
                 FROM tran_TF 
                 WHERE status = 1
             """)
@@ -316,6 +324,8 @@ class FuturesTracker:
                 
                 leverage = row.leverage
                 order_id = row.binance_order_id or "N/A"
+                posisi_ch = row.posisi_ch or ""
+                signal_ch = row.signal_ch or ""
                 
                 # Inisialisasi unrealized PnL dengan 0
                 unrealized_pnl = 0.0
@@ -327,10 +337,10 @@ class FuturesTracker:
                     else:  # SHORT
                         unrealized_pnl = qty * (price_open - self.mark_prices[symbol])
                 
-                # Simpan posisi
-                self.open_positions[symbol] = (position, price_open, qty, leverage, order_id, unrealized_pnl, trade_id, "", "")
+                # Simpan posisi BESERTA DATA SINYAL
+                self.open_positions[symbol] = (position, price_open, qty, leverage, order_id, unrealized_pnl, trade_id, posisi_ch, signal_ch)
                 
-                logger.info(f"Memuat posisi terbuka: {symbol} {position} @ {price_open}, qty={qty}, leverage={leverage}, order_id={order_id}")
+                logger.info(f"Memuat posisi terbuka: {symbol} {position} @ {price_open}, qty={qty}, leverage={leverage}, order_id={order_id}, posisi_ch={posisi_ch}, signal_ch={signal_ch}")
                 
             logger.info(f"Memuat {len(self.open_positions)} posisi terbuka dari database")
         except Exception as e:
@@ -621,6 +631,19 @@ class FuturesTracker:
                             self.last_db_data[symbol] = new_info
                             # Update data yang digunakan di aplikasi
                             self.symbol_info_db[symbol] = new_info
+                            
+                            # Jika simbol ini ada di posisi terbuka, update juga data sinyal di open_positions
+                            with self.position_lock:
+                                if symbol in self.open_positions:
+                                    # Unpack tuple lama
+                                    (position, entry_price, qty, leverage, order_id, unrealized_pnl, trade_id, _, _) = self.open_positions[symbol]
+                                    # Update dengan data sinyal baru
+                                    new_posisi_ch = new_info.get('posisi_ch', '')
+                                    new_signal_ch = new_info.get('signal_ch', '')
+                                    self.open_positions[symbol] = (
+                                        position, entry_price, qty, leverage, order_id, unrealized_pnl, trade_id, new_posisi_ch, new_signal_ch
+                                    )
+                                    logger.info(f"Update sinyal untuk posisi terbuka {symbol}: posisi_ch={new_posisi_ch}, signal_ch={new_signal_ch}")
                         # Jika belum ada cache (pertama kali), isi cache
                         elif symbol not in self.last_db_data:
                             self.last_db_data[symbol] = new_info
@@ -1293,32 +1316,31 @@ class FuturesTracker:
                     
                     # 8. Simpan ke database
                     success_id = self._save_trade_to_db(
-                    symbol, 
-                    execution_price, 
-                    action,  # Parameter position ditambahkan
-                    real_qty, 
-                    self.LEVERAGE, 
-                    order_id,
-                    signal_score=db_info.get('signal_score', 0)  # Parameter signal_score
-                )
+                        symbol, 
+                        execution_price, 
+                        action,  # Parameter position ditambahkan
+                        real_qty, 
+                        self.LEVERAGE, 
+                        order_id
+                    )
                 
-                if success_id:
-                    with self.position_lock, self.processing_lock:
-                        self.open_positions[symbol] = (
-                            action, 
-                            execution_price, 
-                            real_qty, 
-                            self.LEVERAGE, 
-                            order_id, 
-                            0.0,   # unrealized_pnl
-                            success_id,   # ID baris di database
-                            db_posisi,
-                            db_signal_ch
-                        )
-                        self.processing_symbols.discard(symbol)
-                        logger.info(f"Posisi {action} dibuka untuk {symbol} dengan order ID {order_id} dan database ID {success_id}")
-                else:
-                    logger.error(f"Gagal menyimpan trade untuk {symbol} ke database")
+                    if success_id:
+                        with self.position_lock, self.processing_lock:
+                            self.open_positions[symbol] = (
+                                action, 
+                                execution_price, 
+                                real_qty, 
+                                self.LEVERAGE, 
+                                order_id, 
+                                0.0,   # unrealized_pnl
+                                success_id,   # ID baris di database
+                                db_info.get('posisi_ch', ''),   # posisi_ch
+                                db_info.get('signal_ch', '')    # signal_ch
+                            )
+                            self.processing_symbols.discard(symbol)
+                            logger.info(f"Posisi {action} dibuka untuk {symbol} dengan order ID {order_id} dan database ID {success_id}")
+                    else:
+                        logger.error(f"Gagal menyimpan trade untuk {symbol} ke database")
                     
             except queue.Empty:
                 continue
@@ -1448,14 +1470,16 @@ class FuturesTracker:
             
         try:
             cursor = conn.cursor()
-            # Dapatkan posisi untuk perhitungan SL/TP
-            cursor.execute("SELECT posisi FROM tran_TF WHERE id = ?", (order_id_db,))
+            # Dapatkan posisi untuk perhitungan SL/TP dan data sinyal
+            cursor.execute("SELECT posisi, posisi_ch, signal_ch FROM tran_TF WHERE id = ?", (order_id_db,))
             row = cursor.fetchone()
             if not row:
                 logger.error(f"Pending order dengan ID {order_id_db} tidak ditemukan")
                 return False
                 
             position = row[0]
+            posisi_ch = row[1] or ""
+            signal_ch = row[2] or ""
             
             # Hitung ulang SL/TP berdasarkan harga eksekusi
             if position == "LONG":
@@ -1485,19 +1509,23 @@ class FuturesTracker:
                     stop_lose = ?,
                     take_profit = ?,
                     feebinance = ?,
-                    status = 1
+                    status = 1,
+                    posisi_ch = ?,   -- PERTAHANKAN data sinyal
+                    signal_ch = ?     -- PERTAHANKAN data sinyal
                 WHERE id = ?
             """
             params = (
                 execution_price, qty, leverage, binance_order_id,
-                stop_loss, take_profit, fee, order_id_db
+                stop_loss, take_profit, fee, 
+                posisi_ch, signal_ch,   # Data sinyal asli
+                order_id_db
             )
             cursor.execute(query, params)
             conn.commit()
             logger.info(
                 f"Pending order diupdate: id={order_id_db}, price={execution_price:.5f}, qty={qty:.6f}, "
                 f"leverage={leverage}, SL={stop_loss:.5f}, TP={take_profit:.5f}, fee={fee:.5f}, "
-                f"binance_order_id={binance_order_id}"
+                f"binance_order_id={binance_order_id}, posisi_ch={posisi_ch}, signal_ch={signal_ch}"
             )
             return True
         except Exception as e:
