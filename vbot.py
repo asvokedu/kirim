@@ -1316,7 +1316,7 @@ class FuturesTracker:
                         logger.info(slippage_msg)
                     
                     # 6. Hitung ulang quantity jika perlu (dengan harga real)
-                    real_qty = min(qty, (allocated_balance * self.LEVERAGE) / execution_price
+                    real_qty = min(qty, (allocated_balance * self.LEVERAGE) / execution_price)
                     
                     # 7. Dapatkan data terbaru dari DB untuk disimpan di open_positions
                     db_info = self.symbol_info_db.get(symbol, {})
