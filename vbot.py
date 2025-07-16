@@ -42,9 +42,9 @@ class FuturesTracker:
     MAX_SYMBOLS = 150
     ORDERBOOK_DEPTH_LEVEL = 100
     LIQ_HISTORY_WINDOW = 15  # Menit untuk perhitungan rata-rata likuidasi
-    BALANCE_PER_SYMBOL = 40.0  # Saldo $40 untuk setiap koin
+    BALANCE_PER_SYMBOL = 20.0  # Saldo $40 untuk setiap koin
     PROFIT_TARGET = 3.0  # Target profit $3
-    LEVERAGE = 40  # Leverage 40x
+    LEVERAGE = 20  # Leverage 40x
     SLIPPAGE_TOLERANCE = 0.002  # 0.2% default
     MAX_SLIPPAGE_ALERT = 0.005  # 0.5% untuk warning
     MARGIN_MODE = "CROSSED"  # ISOLATED atau CROSSED
@@ -52,6 +52,7 @@ class FuturesTracker:
     ORDER_RETRY_DELAY = 5  # Detik antara percobaan ulang order
     WS_RECONNECT_BACKOFF_MAX = 60  # Maksimum backoff 60 detik
     DB_RELOAD_INTERVAL = 4  # Detik untuk reload data dari database
+    MAX_OPEN_POSITIONS = 1  # Batas maksimal posisi terbuka
     
     # --- URL Endpoint ---
     LIQUIDATION_WS_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
@@ -1218,6 +1219,15 @@ class FuturesTracker:
                 # Hitung margin yang tersedia
                 available_margin = max(0, self.total_balance - self.used_margin)
                 
+                # Cek batas maksimal open posisi
+                with self.position_lock:
+                    current_open_count = len(self.open_positions)
+                if current_open_count >= self.MAX_OPEN_POSITIONS:
+                    logger.warning(f"Batas maksimal open posisi ({self.MAX_OPEN_POSITIONS}) tercapai. Abort order untuk {symbol}.")
+                    with self.processing_lock:
+                        self.processing_symbols.discard(symbol)
+                    continue
+                
                 # Jika margin yang tersedia tidak mencukupi
                 if available_margin < self.BALANCE_PER_SYMBOL * self.SAFETY_MARGIN:
                     logger.warning(
@@ -1306,7 +1316,7 @@ class FuturesTracker:
                         logger.info(slippage_msg)
                     
                     # 6. Hitung ulang quantity jika perlu (dengan harga real)
-                    real_qty = min(qty, (allocated_balance * self.LEVERAGE) / execution_price)
+                    real_qty = min(qty, (allocated_balance * self.LEVERAGE) / execution_price
                     
                     # 7. Dapatkan data terbaru dari DB untuk disimpan di open_positions
                     db_info = self.symbol_info_db.get(symbol, {})
@@ -1535,6 +1545,14 @@ class FuturesTracker:
             conn.close()
 
     def _execute_pending_order(self, symbol: str, position: str, target_price: float, order_id_db: int):
+        # Cek batas open posisi
+        with self.position_lock:
+            current_open_count = len(self.open_positions)
+        if current_open_count >= self.MAX_OPEN_POSITIONS:
+            logger.warning(f"Batas maksimal open posisi ({self.MAX_OPEN_POSITIONS}) tercapai. Abort pending order untuk {symbol}.")
+            self.pending_orders.discard(order_id_db)
+            return
+        
         # Dapatkan harga mark saat ini
         with self.data_lock:
             mark_price = self.mark_prices.get(symbol, 0.0)
@@ -1795,6 +1813,11 @@ class FuturesTracker:
                     self.trading_active = not self.trading_active
                     status = "AKTIF" if self.trading_active else "NONAKTIF"
                     logger.info(f"Trading diubah menjadi {status}")
+                elif c == ord('p'):
+                    # Tampilkan jumlah posisi terbuka
+                    with self.position_lock:
+                        open_count = len(self.open_positions)
+                    logger.info(f"Jumlah posisi terbuka saat ini: {open_count}/{self.MAX_OPEN_POSITIONS}")
 
                 current_time = time.time()
                 if current_time - last_update_time < 0.5:
@@ -1823,7 +1846,9 @@ class FuturesTracker:
                         col_widths[i] += 1
 
                 now = datetime.utcnow()
-                title = f"Binance Futures Realtime - {now.strftime('%Y-%m-%d %H:%M:%S')} UTC | Mode: {self.MARGIN_MODE} | Leverage: {self.LEVERAGE}x | Balance: {self.total_balance:.2f} USDT | Used Margin: {self.used_margin:.2f} USDT | Trading: {'AKTIF' if self.trading_active else 'NONAKTIF'}"
+                with self.position_lock:
+                    open_count = len(self.open_positions)
+                title = f"Binance Futures Realtime - {now.strftime('%Y-%m-%d %H:%M:%S')} UTC | Mode: {self.MARGIN_MODE} | Leverage: {self.LEVERAGE}x | Balance: {self.total_balance:.2f} USDT | Used Margin: {self.used_margin:.2f} USDT | Trading: {'AKTIF' if self.trading_active else 'NONAKTIF'} | Open Positions: {open_count}/{self.MAX_OPEN_POSITIONS}"
                 title_x = max(0, (width - len(title)) // 2)
                 win.addstr(0, title_x, title, curses.A_BOLD | curses.color_pair(4))
                 
@@ -1986,7 +2011,7 @@ class FuturesTracker:
                     row += 1
 
                 # Tampilkan footer sederhana
-                footer = f"Menampilkan {min(len(display_symbols), row-3)} dari {len(display_symbols)} simbol | Open: {len(open_symbols)} | Tekan 'q' untuk keluar | 't' untuk toggle trading"
+                footer = f"Menampilkan {min(len(display_symbols), row-3)} dari {len(display_symbols)} simbol | Open: {len(open_symbols)} | Tekan 'q' untuk keluar | 't' untuk toggle trading | 'p' untuk cek posisi"
                 footer_x = max(0, (width - len(footer)) // 2)
                 if height > 1:
                     win.addstr(height - 1, footer_x, footer, curses.A_DIM)
