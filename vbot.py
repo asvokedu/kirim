@@ -21,7 +21,7 @@ from typing import List, Dict, Any, Set, Optional, Deque, Tuple
 from dotenv import load_dotenv
 from decimal import Decimal
 
-# Load environment variables
+# Load environment
 load_dotenv()
 
 # Setup logging - HANYA KE FILE
