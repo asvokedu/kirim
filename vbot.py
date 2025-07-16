@@ -165,63 +165,77 @@ class FuturesTracker:
             logger.error(f"Gagal konek ke database: {e}")
             return None
 
-    def _save_trade_to_db(self, symbol: str, price_open: float, position: str, 
-                         qty: float, leverage: int, binance_order_id: str, 
-                         status: int = 1, signal_score: int = 0) -> Optional[int]:
-        """Menyimpan eksekusi trading ke database dengan order ID, mengembalikan ID baris yang dibuat"""
+    def _save_trade_to_db(self, symbol: str, price_open: float, 
+                     qty: float, leverage: int, binance_order_id: str, 
+                     status: int = 1) -> Optional[int]:
+        """Update trade aktif di database: hanya update data dinamis (bukan INSERT)"""
         conn = self._get_db_connection()
         if not conn:
             return None
-            
-        # Validasi data sebelum disimpan
+
         if price_open <= 0 or qty <= 0 or leverage <= 0:
-            logger.error(f"Data tidak valid untuk disimpan: price_open={price_open}, qty={qty}, leverage={leverage}")
+            logger.error(f"[ABORT] Data tidak valid: price_open={price_open}, qty={qty}, leverage={leverage}")
             return None
-            
-        # Hitung SL/TP berdasarkan arah posisi
-        if position == "LONG":
-            stop_loss = price_open * 0.99  # -1%
-            take_profit = price_open * 1.03  # +3%
-        else:  # SHORT
-            stop_loss = price_open * 1.01  # +1%
-            take_profit = price_open * 0.97  # -3%
-        
-        fee = price_open * qty * 0.0004  # Fee 0.04%
-        
+
         try:
             cursor = conn.cursor()
-            # Periksa apakah sudah ada posisi aktif untuk simbol ini
-            cursor.execute("SELECT COUNT(*) FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
+
+            # Cari baris aktif berdasarkan simbol
+            cursor.execute("SELECT id, posisi FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
             row = cursor.fetchone()
-            if row and row[0] > 0:
-                logger.error(f"Posisi aktif atau pending untuk {symbol} sudah ada di database, tidak disimpan lagi.")
+
+            if row:
+                row_id = row.id
+                posisi = row.posisi
+
+                # Hitung SL/TP berdasarkan posisi yang sudah ada
+                if posisi == "LONG":
+                    stop_loss = price_open * 0.99
+                    take_profit = price_open * 1.03
+                else:  # SHORT
+                    stop_loss = price_open * 1.01
+                    take_profit = price_open * 0.97
+
+                fee = price_open * qty * 0.0004
+
+                query = """
+                    UPDATE tran_TF
+                    SET price_open = ?, 
+                        stop_lose = ?, 
+                        take_profit = ?, 
+                        feebinance = ?, 
+                        qty = ?, 
+                        leverage = ?, 
+                        binance_order_id = ?, 
+                        status = ?,
+                        timestamp = ?
+                    WHERE id = ?
+                """
+                params = (
+                    price_open, stop_loss, take_profit, fee,
+                    qty, leverage, binance_order_id, status,
+                    datetime.utcnow(),
+                    row_id
+                )
+                cursor.execute(query, params)
+                conn.commit()
+
+                logger.info(
+                    f"[UPDATE] {symbol} {posisi} @ {price_open:.5f} | SL={stop_loss:.5f}, TP={take_profit:.5f} "
+                    f"| qty={qty:.3f}, order_id={binance_order_id}, id={row_id}"
+                )
+                return row_id
+            else:
+                logger.warning(f"Tidak ditemukan posisi aktif untuk {symbol}, update dibatalkan.")
                 return None
-                
-            query = """
-                INSERT INTO tran_TF (
-                    symbol, price_open, price_close, status, posisi, 
-                    stop_lose, take_profit, feebinance, timestamp, qty, leverage, binance_order_id, signal_score
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?);
-                SELECT SCOPE_IDENTITY();
-            """
-            params = (
-                symbol, price_open, 0.0, status, position, 
-                stop_loss, take_profit, fee, datetime.utcnow(), qty, leverage, binance_order_id, signal_score
-            )
-            cursor.execute(query, params)
-            # Dapatkan ID baris yang baru dibuat
-            row_id = cursor.fetchone()[0]
-            conn.commit()
-            logger.info(
-                f"Trade disimpan: {symbol} {position} @ {price_open:.5f}, "
-                f"SL={stop_loss:.5f}, TP={take_profit:.5f}, order_id={binance_order_id}, status={status}, id={row_id}"
-            )
-            return row_id
+
         except Exception as e:
-            logger.error(f"Gagal menyimpan trade: {e}")
+            logger.error(f"Gagal update trade untuk {symbol}: {e}", exc_info=True)
             return None
         finally:
             conn.close()
+
+
 
     def _update_trade_in_db(self, trade_id: int, price_close: float, binance_close_id: str) -> bool:
         """Update posisi saat closing dengan ID baris dan hitung realized PnL"""
