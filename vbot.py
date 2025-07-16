@@ -168,93 +168,91 @@ class FuturesTracker:
    def _save_trade_to_db(self, symbol: str, price_open: float, 
                      qty: float, leverage: int, binance_order_id: str, 
                      status: int = 1) -> Optional[int]:
-        """Update trade aktif di database (bukan INSERT)"""
-        
-        conn = self._get_db_connection()
-        if not conn:
-            logger.error("[DB] Koneksi ke database gagal.")
-            return None
+      """Update trade aktif di database (bukan INSERT)"""
+      
+      conn = self._get_db_connection()
+      if not conn:
+          logger.error("[DB] Koneksi ke database gagal.")
+          return None
 
-        try:
-            # Validasi awal
-            if price_open <= 0 or qty <= 0 or leverage <= 0:
-                logger.error(f"[ABORT] Data tidak valid: price_open={price_open}, qty={qty}, leverage={leverage}")
-                return None
+      try:
+          # Validasi awal
+          if price_open <= 0 or qty <= 0 or leverage <= 0:
+              logger.error(f"[ABORT] Data tidak valid: price_open={price_open}, qty={qty}, leverage={leverage}")
+              return None
 
-            if not binance_order_id or binance_order_id.strip().upper() == "PENDING":
-                logger.error(f"[ABORT] Binance order ID tidak valid: {binance_order_id}")
-                return None
+          if not binance_order_id or binance_order_id.strip().upper() == "PENDING":
+              logger.error(f"[ABORT] Binance order ID tidak valid: {binance_order_id}")
+              return None
 
-            price_open = float(price_open)
-            qty = float(qty)
-            leverage = int(leverage)
+          price_open = float(price_open)
+          qty = float(qty)
+          leverage = int(leverage)
 
-            cursor = conn.cursor()
+          cursor = conn.cursor()
 
-            # Cek apakah baris aktif tersedia
-            logger.debug(f"[CHECK] Cari data aktif: symbol={symbol}, status IN (1,2)")
-            cursor.execute("SELECT id, posisi FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
-            row = cursor.fetchone()
+          # Cek apakah baris aktif tersedia
+          logger.debug(f"[CHECK] Cari data aktif: symbol={symbol}, status IN (1,2)")
+          cursor.execute("SELECT id, posisi FROM tran_TF WHERE symbol = ? AND status IN (1, 2)", (symbol,))
+          row = cursor.fetchone()
 
-            if not row:
-                logger.warning(f"[SKIP] Tidak ditemukan baris aktif di tran_TF untuk symbol={symbol}")
-                return None
+          if not row:
+              logger.warning(f"[SKIP] Tidak ditemukan baris aktif di tran_TF untuk symbol={symbol}")
+              return None
 
-            row_id = row.id if hasattr(row, 'id') else row[0]
-            posisi = row.posisi if hasattr(row, 'posisi') else row[1]
+          row_id = row.id if hasattr(row, 'id') else row[0]
+          posisi = row.posisi if hasattr(row, 'posisi') else row[1]
 
-            # Hitung SL/TP berdasarkan posisi
-            if posisi.upper() == "LONG":
-                stop_loss = price_open * 0.99
-                take_profit = price_open * 1.03
-            else:
-                stop_loss = price_open * 1.01
-                take_profit = price_open * 0.97
+          # Hitung SL/TP berdasarkan posisi
+          if posisi.upper() == "LONG":
+              stop_loss = price_open * 0.99
+              take_profit = price_open * 1.03
+          else:
+              stop_loss = price_open * 1.01
+              take_profit = price_open * 0.97
 
-            feebinance = price_open * qty * 0.0004
-            timestamp = datetime.utcnow()
+          feebinance = price_open * qty * 0.0004
+          timestamp = datetime.utcnow()
 
-            query = """
-                UPDATE tran_TF
-                SET price_open = ?, 
-                    stop_lose = ?, 
-                    take_profit = ?, 
-                    feebinance = ?, 
-                    qty = ?, 
-                    leverage = ?, 
-                    binance_order_id = ?, 
-                    status = ?, 
-                    timestamp = ?
-                WHERE id = ?
-            """
+          query = """
+              UPDATE tran_TF
+              SET price_open = ?, 
+                  stop_lose = ?, 
+                  take_profit = ?, 
+                  feebinance = ?, 
+                  qty = ?, 
+                  leverage = ?, 
+                  binance_order_id = ?, 
+                  status = ?, 
+                  timestamp = ?
+              WHERE id = ?
+          """
 
-            params = (
-                price_open, stop_loss, take_profit, feebinance,
-                qty, leverage, binance_order_id, status, timestamp, row_id
-            )
+          params = (
+              price_open, stop_loss, take_profit, feebinance,
+              qty, leverage, binance_order_id, status, timestamp, row_id
+          )
 
-            logger.debug(f"[QUERY] UPDATE row_id={row_id}, params={params}")
-            cursor.execute(query, params)
-            conn.commit()
+          logger.debug(f"[QUERY] UPDATE row_id={row_id}, params={params}")
+          cursor.execute(query, params)
+          conn.commit()
 
-            if cursor.rowcount == 0:
-                logger.warning(f"[WARNING] UPDATE gagal: tidak ada baris yang berubah untuk id={row_id}")
-                return None
+          if cursor.rowcount == 0:
+              logger.warning(f"[WARNING] UPDATE gagal: tidak ada baris yang berubah untuk id={row_id}")
+              return None
 
-            logger.info(
-                f"[UPDATED] symbol={symbol}, posisi={posisi}, price_open={price_open:.2f}, "
-                f"qty={qty}, SL={stop_loss:.2f}, TP={take_profit:.2f}, id={row_id}, status={status}"
-            )
-            return row_id
+          logger.info(
+              f"[UPDATED] symbol={symbol}, posisi={posisi}, price_open={price_open:.2f}, "
+              f"qty={qty}, SL={stop_loss:.2f}, TP={take_profit:.2f}, id={row_id}, status={status}"
+          )
+          return row_id
 
-        except Exception as e:
-            logger.exception(f"[ERROR] Gagal update trade ke DB untuk symbol={symbol}: {e}")
-            return None
+      except Exception as e:
+          logger.exception(f"[ERROR] Gagal update trade ke DB untuk symbol={symbol}: {e}")
+          return None
 
-        finally:
-            conn.close()
-
-
+      finally:
+          conn.close()
 
 
     def _update_trade_in_db(self, trade_id: int, price_close: float, binance_close_id: str) -> bool:
