@@ -319,7 +319,7 @@ class BinanceFuturesBot:
                             else:
                                 self.update_signal_status(signal_id, 'FAILED')
                 
-                time.sleep(10)
+                time.sleep(10)  # PERBAIKAN: Tanda kurung tambahan dihapus di sini
             except Exception as e:
                 logger.error(f"Signal processing error: {e}")
                 time.sleep(30)
