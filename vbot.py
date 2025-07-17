@@ -7,7 +7,12 @@ from decimal import Decimal
 import os
 from dotenv import load_dotenv
 import logging
-import json
+from rich.console import Console
+from rich.table import Table
+from rich.layout import Layout
+from rich.live import Live
+from rich.panel import Panel
+from rich.text import Text
 
 # Setup logging
 logging.basicConfig(
@@ -20,10 +25,129 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+class TerminalDashboard:
+    def __init__(self):
+        self.console = Console()
+        self.layout = Layout()
+        self.last_update = datetime.now()
+        
+        # Split the layout into parts
+        self.layout.split(
+            Layout(name="header", size=3),
+            Layout(name="main", ratio=1),
+            Layout(name="footer", size=3)
+        )
+        self.main = self.layout["main"]
+        self.main.split(
+            Layout(name="left", ratio=1),
+            Layout(name="right", ratio=1)
+        )
+        self.left = self.main["left"]
+        self.right = self.main["right"]
+        
+    def update_dashboard(self, bot):
+        """Update all dashboard panels"""
+        self.last_update = datetime.now()
+        
+        # Header panel
+        self.layout["header"].update(
+            Panel(Text(f"Binance Futures Bot | Last Update: {self.last_update.strftime('%Y-%m-%d %H:%M:%S')}", 
+                  justify="center", style="bold blue"))
+        
+        # Balance panel
+        balance_text = Text()
+        balance_text.append(f"Total Balance: {bot.total_balance} USDT\n", style="green")
+        balance_text.append(f"Used Margin: {bot.used_margin} USDT\n", style="yellow")
+        balance_text.append(f"Available: {bot.total_balance - bot.used_margin} USDT", style="blue")
+        
+        # Positions panel
+        positions_table = Table(title="Open Positions", show_lines=True)
+        positions_table.add_column("Symbol")
+        positions_table.add_column("Side")
+        positions_table.add_column("Amount")
+        positions_table.add_column("Entry")
+        positions_table.add_column("Current")
+        positions_table.add_column("PnL")
+        
+        for symbol, pos in bot.positions.items():
+            pnl = bot.calculate_pnl(
+                pos['side'], 
+                pos['amount'], 
+                pos['entryPrice'], 
+                bot.mark_prices.get(symbol, Decimal('0')), 
+                1  # Leverage 1 for display
+            )
+            positions_table.add_row(
+                symbol.replace('/USDT', ''),
+                pos['side'],
+                f"{pos['amount']:.4f}",
+                f"{pos['entryPrice']:.4f}",
+                f"{bot.mark_prices.get(symbol, Decimal('0')):.4f}",
+                f"{pnl:.2f}%",
+                style="green" if pnl >= 0 else "red"
+            )
+        
+        # Prices panel
+        prices_table = Table(title="Market Prices", show_lines=True)
+        prices_table.add_column("Symbol")
+        prices_table.add_column("Last")
+        prices_table.add_column("Mark")
+        
+        for symbol, price in list(bot.mark_prices.items())[:10]:  # Show top 10
+            prices_table.add_row(
+                symbol.replace('/USDT', ''),
+                f"{price:.4f}",
+                f"{bot.mark_prices.get(symbol, Decimal('0')):.4f}"
+            )
+        
+        # Trades panel
+        trades_table = Table(title="Recent Trades", show_lines=True)
+        trades_table.add_column("Time")
+        trades_table.add_column("Symbol")
+        trades_table.add_column("Side")
+        trades_table.add_column("Qty")
+        trades_table.add_column("Price")
+        trades_table.add_column("Status")
+        
+        for trade in bot.trade_history[-10:]:  # Show last 10 trades
+            trades_table.add_row(
+                trade['time'],
+                trade['symbol'],
+                trade['side'],
+                f"{trade['qty']:.4f}",
+                f"{trade['price']:.4f}" if trade['price'] != 'N/A' else 'N/A',
+                trade['status'],
+                style="green" if trade['status'] == 'EXECUTED' else "red"
+            )
+        
+        # Update layout
+        self.left.update(
+            Layout(
+                Panel(balance_text, title="Balance"),
+                Panel(positions_table, title="Positions")
+            )
+        )
+        self.right.update(
+            Layout(
+                Panel(prices_table, title="Prices"),
+                Panel(trades_table, title="Trades")
+            )
+        )
+        
+        # Footer panel
+        self.layout["footer"].update(
+            Panel(Text("Press Ctrl+C to exit", justify="center", style="bold yellow"))
+        )
+        
+        return self.layout
+
 class BinanceFuturesBot:
     def __init__(self):
         # Load environment variables
         load_dotenv()
+        
+        # Initialize dashboard
+        self.dashboard = TerminalDashboard()
         
         # Trading configuration
         self.BALANCE_PER_SYMBOL = Decimal(os.getenv('BALANCE_PER_SYMBOL', '1000'))
@@ -31,7 +155,21 @@ class BinanceFuturesBot:
         self.SLIPPAGE_TOLERANCE = Decimal(os.getenv('SLIPPAGE_TOLERANCE', '0.005'))
         self.MIN_REOPEN_DELAY = int(os.getenv('MIN_REOPEN_DELAY', '60'))
         
-        # Inisialisasi koneksi Binance
+        # Initialize exchange connection
+        self.init_exchange()
+        
+        # Initialize database connection
+        self.init_database()
+        
+        # Trading data
+        self.init_trading_data()
+        
+        # Start background threads
+        self.running = True
+        self.start_background_threads()
+
+    def init_exchange(self):
+        """Initialize exchange connection"""
         self.exchange = ccxt.binance({
             'apiKey': os.getenv('BINANCE_API_KEY'),
             'secret': os.getenv('BINANCE_API_SECRET'),
@@ -40,36 +178,10 @@ class BinanceFuturesBot:
                 'defaultType': 'future',
             }
         })
-        
-        # Inisialisasi koneksi database
-        self.db_conn = self.create_db_connection()
-        self.db_cursor = self.db_conn.cursor()
-        
-        # Data trading
-        self.last_prices = {}
-        self.mark_prices = {}
-        self.last_closed_time = {}
-        self.total_balance = Decimal('0')
-        self.used_margin = Decimal('0')
-        self.positions = {}
-        
-        # Flag untuk menghentikan thread
-        self.running = True
-        
-        # Mapping status
-        self.status_mapping = {
-            'PENDING': 0,
-            'OPEN': 1,
-            'CLOSED': 2,
-            'CANCELED': 3,
-            'FAILED': 4
-        }
-        
-        # Load balance awal
-        self.update_balance()
-        
-    def create_db_connection(self):
-        """Membuat koneksi ke database SQL Server"""
+        logger.info("Exchange connection initialized")
+
+    def init_database(self):
+        """Initialize database connection"""
         try:
             conn_str = (
                 f"DRIVER={os.getenv('SQL_DRIVER')};"
@@ -78,39 +190,44 @@ class BinanceFuturesBot:
                 f"UID={os.getenv('SQL_USERNAME')};"
                 f"PWD={os.getenv('SQL_PASSWORD')};"
             )
-            return pyodbc.connect(conn_str)
+            self.db_conn = pyodbc.connect(conn_str)
+            self.db_cursor = self.db_conn.cursor()
+            logger.info("Database connection initialized")
         except Exception as e:
-            logger.error(f"Gagal terhubung ke database: {e}")
+            logger.error(f"Failed to connect to database: {e}")
             raise
 
+    def init_trading_data(self):
+        """Initialize trading data structures"""
+        self.last_prices = {}
+        self.mark_prices = {}
+        self.last_closed_time = {}
+        self.total_balance = Decimal('0')
+        self.used_margin = Decimal('0')
+        self.positions = {}
+        self.trade_history = []
+        self.status_mapping = {
+            'PENDING': 0,
+            'OPEN': 1,
+            'CLOSED': 2,
+            'CANCELED': 3,
+            'FAILED': 4
+        }
+
     def start(self):
-        """Memulai bot trading"""
-        logger.info("Memulai Binance Futures Trading Bot...")
-        logger.info(f"Konfigurasi: Balance per Symbol={self.BALANCE_PER_SYMBOL}, Safety Margin={self.SAFETY_MARGIN}")
-        logger.info(f"Slippage Tolerance={self.SLIPPAGE_TOLERANCE}, Min Reopen Delay={self.MIN_REOPEN_DELAY}s")
-        
-        try:
-            # Mulai thread untuk memantau harga dan balance
-            price_thread = threading.Thread(target=self.monitor_prices_and_balance, daemon=True)
-            price_thread.start()
-            
-            # Mulai thread untuk memproses signal
-            signal_thread = threading.Thread(target=self.process_signals, daemon=True)
-            signal_thread.start()
-            
-            # Mulai thread untuk memantau posisi terbuka
-            position_thread = threading.Thread(target=self.monitor_positions, daemon=True)
-            position_thread.start()
-            
+        """Start the bot with live dashboard"""
+        with Live(self.dashboard.layout, refresh_per_second=4, screen=True) as live:
             while self.running:
-                time.sleep(1)
-                
-        except KeyboardInterrupt:
-            logger.info("Menghentikan bot...")
-            self.running = False
-        except Exception as e:
-            logger.error(f"Error utama: {e}")
-            self.running = False
+                try:
+                    live.update(self.dashboard.update_dashboard(self))
+                    time.sleep(1)
+                except KeyboardInterrupt:
+                    logger.info("Menghentikan bot...")
+                    self.running = False
+                except Exception as e:
+                    logger.error(f"Error in dashboard update: {e}")
+                    time.sleep(5)
+
             
     def monitor_prices_and_balance(self):
         """Memantau harga dan balance secara realtime"""
@@ -550,9 +667,10 @@ if __name__ == "__main__":
         import ccxt
         import pyodbc
         from dotenv import load_dotenv
+        from rich import print
     except ImportError as e:
         print(f"Package yang diperlukan belum terinstall: {e}")
-        print("Silakan install dengan perintah: pip install ccxt pyodbc python-dotenv")
+        print("Silakan install dengan perintah: pip install ccxt pyodbc python-dotenv rich")
         exit(1)
     
     try:
