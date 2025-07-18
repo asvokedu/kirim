@@ -99,7 +99,7 @@ class FuturesTracker:
         self.previous_oi: Dict[str, float] = {}
         
         # Menyimpan history likuidasi untuk perhitungan rata-rata
-        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]] = {}
+        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]]] = {}
         
         # Menyimpan data dari stored procedure
         self.symbol_info_db: Dict[str, Dict] = {}  # {symbol: {id, price_open, posisi, posisi_ch, signal_score, signal_ch}}
