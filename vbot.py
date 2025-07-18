@@ -21,7 +21,7 @@ from typing import List, Dict, Any, Set, Optional, Deque, Tuple
 from dotenv import load_dotenv
 from decimal import Decimal
 
-# Load environment 
+# Load environment variables
 load_dotenv()
 
 # Setup logging - HANYA KE FILE
@@ -216,25 +216,21 @@ class FuturesTracker:
                         binance_order_id = ?, 
                         status = 1,
                         timestamp = ?,
-                        signal_score = ?,   -- GUNAKAN NILAI TERBARU
-                        posisi = ?          -- UPDATE KOLOM POSISI
+                        signal_score = ?   -- GUNAKAN NILAI TERBARU
                     WHERE id = ?
                 """
                 params = (
                     price_open, stop_loss, take_profit, fee,
                     qty, leverage, binance_order_id, 
                     datetime.utcnow(), 
-                    current_signal_score,
-                    position,   # Nilai untuk kolom `posisi`
-                    row_id
+                    current_signal_score, row_id   # Data sinyal terbaru
                 )
                 cursor.execute(query, params)
                 conn.commit()
 
                 logger.info(
                     f"[UPDATE] {symbol} {position} @ {price_open:.5f} | "
-                    f"signal_score={current_signal_score} | "
-                    f"posisi={position} (diupdate)"
+                    f"signal_score={current_signal_score} "
                 )
                 return row_id
             else:
@@ -246,7 +242,6 @@ class FuturesTracker:
             return None
         finally:
             conn.close()
-
 
     def _vbot_update_trade_in_db(self, trade_id: int, price_close: float, binance_close_id: str) -> bool:
         """Update posisi saat closing dengan ID baris dan hitung realized PnL"""
@@ -581,7 +576,6 @@ class FuturesTracker:
     def _vbot_periodic_db_reloader(self):
         """Reload data dari stored procedure setiap 12 detik"""
         while not self.shutdown_event.is_set():
-            # Tunggu 12 detik
             time.sleep(self.DB_RELOAD_INTERVAL)
             if self.shutdown_event.is_set():
                 break
@@ -1046,32 +1040,23 @@ class FuturesTracker:
                 "https://fapi.binance.com/fapi/v1/marginType",
                 headers=headers,
                 params=payload,
-                timeout=10  # Tambah timeout
+                timeout=5
             )
             
             # Tangani response khusus
-            if response.status_code != 200:
+            if response.status_code == 400:
                 error_data = response.json()
-                logger.warning(f"Response set margin mode {symbol}: {error_data}")
                 if error_data.get('code') == -4046:  # Margin type sudah sesuai
                     logger.info(f"Margin mode sudah {self.MARGIN_MODE} untuk {symbol}")
                     return True
                 if error_data.get('code') == -4047:  # Ada posisi terbuka
                     logger.warning(f"Tidak bisa ubah margin type untuk {symbol} karena ada posisi terbuka")
                     return False
-                # Log error lainnya
-                logger.error(f"Error set margin mode {symbol}: code={error_data.get('code')}, msg={error_data.get('msg')}")
-                return False
-                
+            
+            response.raise_for_status()
+            logger.info(f"Margin mode {self.MARGIN_MODE} berhasil diatur untuk {symbol}")
             return True
         except Exception as e:
-            # Tambahkan log untuk melihat pesan error dari Binance
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    logger.error(f"Error response set margin mode: {error_data}")
-                except:
-                    logger.error(f"Error response text: {e.response.text}")
             logger.error(f"Gagal atur margin mode untuk {symbol}: {str(e)}")
             return False
 
@@ -1101,34 +1086,20 @@ class FuturesTracker:
                 "https://fapi.binance.com/fapi/v1/leverage",
                 headers=headers,
                 params=payload,
-                timeout=10  # Tambah timeout
+                timeout=5
             )
             
             # Tangani error khusus
             if response.status_code == 400:
                 error_data = response.json()
-                logger.warning(f"Response set leverage {symbol}: {error_data}")
                 if error_data.get('code') == -4046:  # Leverage sudah sesuai
                     logger.info(f"Leverage sudah {self.LEVERAGE}x untuk {symbol}")
                     return True
-                elif error_data.get('code') == -4174:  # Leverage tidak berubah
-                    logger.info(f"Leverage tidak berubah untuk {symbol}")
-                    return True
-                else:
-                    logger.error(f"Error set leverage {symbol}: code={error_data.get('code')}, msg={error_data.get('msg')}")
-                    return False
             
             response.raise_for_status()
             logger.info(f"Leverage {self.LEVERAGE}x berhasil diatur untuk {symbol}")
             return True
         except Exception as e:
-            # Tambahkan log untuk melihat pesan error dari Binance
-            if hasattr(e, 'response') and e.response is not None:
-                try:
-                    error_data = e.response.json()
-                    logger.error(f"Error response set leverage: {error_data}")
-                except:
-                    logger.error(f"Error response text: {e.response.text}")
             logger.error(f"Gagal atur leverage {self.LEVERAGE}x untuk {symbol}: {str(e)}")
             return False
 
@@ -1281,7 +1252,6 @@ class FuturesTracker:
                     success = False
                     
                     for attempt in range(MAX_RETRIES):
-                        logger.info(f"Mencoba atur leverage untuk {symbol} (percobaan {attempt+1}/{MAX_RETRIES})")
                         if self._vbot_set_margin_mode(symbol) and self._vbot_set_leverage(symbol):
                             success = True
                             break
@@ -1290,7 +1260,6 @@ class FuturesTracker:
                     if success:
                         self.leverage_set.add(symbol)
                         time.sleep(0.5)  # Beri waktu untuk Binance memproses
-                        logger.info(f"Leverage berhasil diatur untuk {symbol}")
                     else:
                         logger.error(f"Gagal atur leverage setelah {MAX_RETRIES} percobaan, skip {symbol}")
                         with self.processing_lock:
@@ -1300,8 +1269,8 @@ class FuturesTracker:
                 # Pastikan price_open valid (tidak 0) dan sinyal masih aktif
                 with self.reload_lock:
                     db_info = self.symbol_info_db.get(symbol, {})
-                    price_open = db_info.get('price_open', 0.0)
-                    signal_score = db_info.get('signal_score', 0)
+                price_open = db_info.get('price_open', 0.0)
+                signal_score = db_info.get('signal_score', 0)
                 
                 # Validasi akhir sebelum eksekusi
                 if price_open <= 0 or signal_score == 0:
@@ -1573,7 +1542,7 @@ class FuturesTracker:
                     take_profit = ?,
                     feebinance = ?,
                     status = 1,
-                    signal_score = ?,   -- GUNAKAN NILAI TERBARU
+                    signal_score = ?   -- GUNAKAN NILAI TERBARU
                 WHERE id = ?
             """
             params = (
@@ -2140,17 +2109,6 @@ class FuturesTracker:
         print("Memulai tampilan realtime...")
         curses.wrapper(self._vbot_display_dashboard)
         print("\nMenunggu thread untuk berhenti... Selesai.")
-
-if __name__ == "__main__":
-    try:
-        app = FuturesTracker()
-        app.run()
-    except (KeyboardInterrupt, SystemExit) as e:
-        print(f"\nProgram dihentikan: {e}")
-    except Exception as e:
-        logger.critical(f"Terjadi error fatal: {e}", exc_info=True)
-        print(f"\nTerjadi error fatal. Periksa file 'futures_live.log' untuk detail.")
-
 
 if __name__ == "__main__":
     try:
