@@ -26,10 +26,10 @@ load_dotenv()
 
 # Setup logging - HANYA KE FILE
 logging.basicConfig(
-    level=logging.DEBUG,  # Ubah ke DEBUG untuk troubleshooting
+    level=logging.DEBUG,
     format="%(asctime)s [%(levelname)s] [%(threadName)s] %(message)s",
     handlers=[
-        logging.FileHandler("futures_live.log", mode='a'),  # Mode append untuk melihat history
+        logging.FileHandler("futures_live.log", mode='a'),
     ]
 )
 logger = logging.getLogger()
@@ -41,18 +41,19 @@ class FuturesTracker:
     MAX_CONCURRENT_REQUESTS = 20
     MAX_SYMBOLS = 150
     ORDERBOOK_DEPTH_LEVEL = 100
-    LIQ_HISTORY_WINDOW = 15  # Menit untuk perhitungan rata-rata likuidasi
-    BALANCE_PER_SYMBOL = 40.0  # Saldo $40 untuk setiap koin
-    PROFIT_TARGET = 3.0  # Target profit $3
-    LEVERAGE = 40  # Leverage 40x
-    SLIPPAGE_TOLERANCE = 0.002  # 0.2% default
-    MAX_SLIPPAGE_ALERT = 0.005  # 0.5% untuk warning
-    MARGIN_MODE = "CROSSED"  # ISOLATED atau CROSSED
-    SAFETY_MARGIN = 0.95  # Faktor keamanan 95% untuk margin
-    ORDER_RETRY_DELAY = 5  # Detik antara percobaan ulang order
-    WS_RECONNECT_BACKOFF_MAX = 60  # Maksimum backoff 60 detik
-    DB_RELOAD_INTERVAL = 4  # Detik untuk reload data dari database
-    MAX_OPEN_POSITIONS = 2  # Batas maksimal posisi terbuka
+    LIQ_HISTORY_WINDOW = 15
+    BALANCE_PER_SYMBOL = 40.0
+    PROFIT_TARGET = 3.0
+    LEVERAGE = 40
+    SLIPPAGE_TOLERANCE = 0.002
+    MAX_SLIPPAGE_ALERT = 0.005
+    MARGIN_MODE = "CROSSED"
+    SAFETY_MARGIN = 0.95
+    ORDER_RETRY_DELAY = 5
+    WS_RECONNECT_BACKOFF_MAX = 60
+    DB_RELOAD_INTERVAL = 4
+    MAX_OPEN_POSITIONS = 2
+    ALLOCATED_PERCENT_PER_TRADE = 0.1  # Persentase alokasi per trade
     
     # --- URL Endpoint ---
     LIQUIDATION_WS_URL = "wss://fstream.binance.com/ws/!forceOrder@arr"
@@ -81,73 +82,48 @@ class FuturesTracker:
         self.valid_symbols: Set[str] = set()
         self.shutdown_event = threading.Event()
         self.data_lock = threading.Lock()
-        self.symbol_info_cache: Dict[str, Dict] = {}  # Cache untuk info simbol
-        self.leverage_set: Set[str] = set()  # Simpan simbol yang sudah diatur leverage
-        self.total_balance = 0.0  # Total saldo akun
-        self.used_margin = 0.0   # Margin yang sedang digunakan
+        self.symbol_info_cache: Dict[str, Dict] = {}
+        self.leverage_set: Set[str] = set()
+        self.total_balance = 0.0
+        self.used_margin = 0.0
         
         self.liquidation_accumulator: Dict[str, Dict[str, float]] = {}
         self.volume_accumulator: Dict[str, Dict[str, float]] = {}
         self.order_books: Dict[str, Dict[str, Any]] = {}
         self.display_data: Dict[str, Dict[str, Any]] = {}
         
-        # Struktur data untuk harga
         self.last_prices: Dict[str, float] = {}
         self.mark_prices: Dict[str, float] = {}
         
-        # Menyimpan OI sebelumnya untuk perhitungan perubahan
         self.previous_oi: Dict[str, float] = {}
-        
-        # Menyimpan history likuidasi untuk perhitungan rata-rata
-        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]] = {}
-        
-        # Menyimpan data dari stored procedure
-        self.symbol_info_db: Dict[str, Dict] = {}  # {symbol: {id, price_open, posisi, posisi_ch, signal_score, signal_ch}}
-        
-        # Cache untuk volatility dan spread_threshold
+        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]]] = {}
+        self.symbol_info_db: Dict[str, Dict] = {}
         self.volatility_cache: Dict[str, float] = {}
         self.spread_threshold_cache: Dict[str, float] = {}
         self.threshold_last_updated: Dict[str, float] = {}
-        
-        # Cache untuk burst liquidation threshold
-        self.burst_threshold_cache: Dict[str, Dict[str, float]] = {}  # {symbol: {'buy': float, 'sell': float}}
+        self.burst_threshold_cache: Dict[str, Dict[str, float]] = {}
         self.burst_threshold_last_updated: Dict[str, float] = {}
-        
-        # Cache untuk data database terakhir per simbol
-        self.last_db_data: Dict[str, Dict] = {}  # Format: {symbol: {'id': ..., 'posisi': ..., 'price_open': ..., 'posisi_ch': ..., 'signal_ch': ...}}
+        self.last_db_data: Dict[str, Dict] = {}
         
         self.liquidation_queue = queue.Queue()
         self.trade_queue = queue.Queue()
-        self.trading_queue = queue.Queue()  # Queue untuk eksekusi trading
-        self.depth_queue = queue.Queue()  # Queue untuk depth updates
+        self.trading_queue = queue.Queue()
+        self.depth_queue = queue.Queue()
         
-        # Menyimpan posisi terbuka {symbol: (position, price_open, qty, leverage, order_id, unrealized_pnl, db_id, db_posisi, db_signal_ch)}
         self.open_positions: Dict[str, Tuple] = {}  
         self.position_lock = threading.Lock()
-        
-        # Untuk mencegah race condition
         self.processing_symbols = set()
         self.processing_lock = threading.Lock()
-        
-        # Queue untuk retry leverage setting
         self.leverage_retry_queue = queue.Queue()
-        
-        # Untuk menandai order yang sedang diproses
         self.pending_orders = set()
         self.request_semaphore = threading.Semaphore(self.MAX_CONCURRENT_REQUESTS)
-        # Flag untuk reload simbol
         self.symbols_reload_needed = False
         self.symbols_reload_time = time.time()
         self.reload_lock = threading.Lock()
-        
-        # Cache untuk realized PnL
         self.pnl_real_cache: Dict[int, float] = {}
-        
-        # Untuk penanda status trading
         self.trading_active = True
 
     def _vbot_get_db_connection(self) -> Optional[pyodbc.Connection]:
-        """Membuat koneksi baru ke database SQL Server"""
         if not all([self.SQL_SERVER, self.SQL_DATABASE, self.SQL_USERNAME, self.SQL_PASSWORD]):
             logger.error("Variabel lingkungan database tidak lengkap!")
             return None
@@ -167,9 +143,7 @@ class FuturesTracker:
             return None
 
     def _vbot_save_trade_to_db(self, symbol: str, price_open: float, 
-                                position: str, qty: float, leverage: int, 
-                                binance_order_id: str) -> Optional[int]:
-        """Update trade aktif di database: simpan data open posisi"""
+                     position: str, qty: float, leverage: int, binance_order_id: str) -> Optional[int]:
         conn = self._vbot_get_db_connection()
         if not conn:
             return None
@@ -180,24 +154,22 @@ class FuturesTracker:
 
         try:
             cursor = conn.cursor()
-
-            # Ambil ID baris aktif dari view_td
             cursor.execute("SELECT id FROM view_td WHERE symbol = ? AND status IN (1, 2)", (symbol,))
             row = cursor.fetchone()
 
             if row:
                 row_id = row.id
-
-                # Ambil sinyal terkini dari cache
+                
                 with self.reload_lock:
                     current_info = self.symbol_info_db.get(symbol, {})
                 current_signal_score = current_info.get('signal_score', 0)
-
-                # Hitung SL/TP
+                current_posisi_ch = current_info.get('posisi_ch', '')
+                current_signal_ch = current_info.get('signal_ch', '')
+                
                 if position == "LONG":
                     stop_loss = price_open * 0.99
                     take_profit = price_open * 1.03
-                else:  # SHORT
+                else:
                     stop_loss = price_open * 1.01
                     take_profit = price_open * 0.97
 
@@ -205,32 +177,26 @@ class FuturesTracker:
 
                 query = """
                     UPDATE tran_TF
-                    SET price_open = ?, 
-                        stop_lose = ?, 
+                    SET stop_lose = ?, 
                         take_profit = ?, 
                         feebinance = ?, 
                         qty = ?, 
                         leverage = ?, 
                         binance_order_id = ?, 
-                        status = 1,
-                        signal_score = ?
+                        status = 1
                     WHERE id = ?
                 """
                 params = (
-                    price_open, stop_loss, take_profit, fee,
-                    qty, leverage, binance_order_id,
-                    current_signal_score, row_id
+                    stop_loss, take_profit, fee,
+                    qty, leverage, binance_order_id, 
+                    row_id
                 )
                 cursor.execute(query, params)
-
-                if cursor.rowcount == 0:
-                    logger.error(f"[ERROR] Update gagal: tidak ada baris dengan id={row_id} di tran_TF")
-                    return None
-
                 conn.commit()
+
                 logger.info(
-                    f"[UPDATE] {symbol} {position} @ {price_open:.5f} | qty={qty:.4f} | order_id={binance_order_id} | "
-                    f"SL={stop_loss:.5f} TP={take_profit:.5f} fee={fee:.5f} | signal_score={current_signal_score}"
+                    f"[UPDATE] {symbol} {position} @ {price_open:.5f} | "
+                    f"signal_score={current_signal_score} "
                 )
                 return row_id
             else:
@@ -243,16 +209,13 @@ class FuturesTracker:
         finally:
             conn.close()
 
-
     def _vbot_update_trade_in_db(self, trade_id: int, price_close: float, binance_close_id: str, close_reason: str) -> bool:
-        """Update posisi saat closing dengan ID baris dan hitung realized PnL"""
         conn = self._vbot_get_db_connection()
         if not conn:
             return False
             
         try:
             cursor = conn.cursor()
-            # Ambil data entry dari database
             cursor.execute("SELECT price_open, qty, posisi FROM view_td WHERE id = ?", (trade_id,))
             row = cursor.fetchone()
             if not row:
@@ -262,15 +225,13 @@ class FuturesTracker:
             entry_price = float(row.price_open)
             qty_val = float(row.qty)
             posisi = row.posisi
-            fee_rate = 0.0004  # Fee 0.04%
+            fee_rate = 0.0004
 
-            # Hitung total fee 2 arah
             total_fee = (entry_price + price_close) * qty_val * fee_rate
             
-            # Hitung PnL berdasarkan arah posisi
             if posisi == "LONG":
                 realized_pnl = (price_close - entry_price) * qty_val
-            else:  # SHORT
+            else:
                 realized_pnl = (entry_price - price_close) * qty_val
                 
             net_pnl = realized_pnl - total_fee
@@ -301,15 +262,209 @@ class FuturesTracker:
         finally:
             conn.close()
 
+    # ===== FUNGSI BARU DARI improve.py =====
+    def _vbot_open_position(self, symbol: str, position: str) -> Optional[int]:
+        try:
+            # Dapatkan saldo akun
+            self._vbot_get_account_balance()
+            if self.total_balance <= 0:
+                logger.error(f"[ABORT] Balance tidak tersedia atau nol.")
+                return None
+
+            # Dapatkan harga mark
+            mark_price = self.mark_prices.get(symbol, 0.0)
+            if mark_price <= 0:
+                logger.error(f"[ABORT] Mark price tidak valid untuk {symbol}")
+                return None
+
+            # Hitung quantity
+            qty = (self.total_balance * self.ALLOCATED_PERCENT_PER_TRADE) * self.LEVERAGE / mark_price
+            qty = self._vbot_round_qty(symbol, qty)
+
+            if qty <= 0:
+                logger.error(f"[ABORT] Qty hasil kalkulasi 0 untuk {symbol}")
+                return None
+
+            # Tentukan sisi order
+            order_side = "BUY" if position == "LONG" else "SELL"
+            logger.info(f"[EXECUTE] {symbol} {position} | Qty: {qty:.4f} | Side: {order_side}")
+
+            # Eksekusi order
+            order_result = self._vbot_execute_trade(symbol, order_side, qty)
+            if not order_result:
+                logger.error(f"[SKIP] Gagal eksekusi order ke Binance")
+                return None
+
+            # Proses hasil order
+            execution_price = float(order_result.get("avgPrice", 0.0))
+            if execution_price <= 0:
+                # Fallback ke fills jika avgPrice tidak valid
+                fills = order_result.get("fills", [])
+                if fills:
+                    try:
+                        execution_price = float(fills[0].get("price", 0.0))
+                        logger.debug(f"[FALLBACK] Fills digunakan, price: {execution_price}")
+                    except Exception as e:
+                        logger.warning(f"[FALLBACK ERROR] Parsing fills gagal: {e}")
+                        execution_price = 0.0
+
+            executed_qty = float(order_result.get("executedQty", 0.0))
+            order_id = str(order_result.get("orderId", ""))
+
+            if execution_price <= 0 or executed_qty <= 0 or not order_id:
+                logger.error(f"[ABORT] Data order tidak valid: price={execution_price}, qty={executed_qty}, id={order_id}")
+                return None
+
+            # Simpan ke database
+            row_id = self._vbot_save_trade_to_db(
+                symbol=symbol,
+                price_open=execution_price,
+                position=position,
+                qty=executed_qty,
+                leverage=self.LEVERAGE,
+                binance_order_id=order_id
+            )
+
+            if row_id:
+                logger.info(f"[SUCCESS] Order {symbol} tersimpan ke DB. Row ID: {row_id}")
+                # Tambahkan ke open positions
+                with self.position_lock:
+                    self.open_positions[symbol] = (
+                        position, 
+                        execution_price, 
+                        executed_qty, 
+                        self.LEVERAGE, 
+                        order_id, 
+                        0.0,   # unrealized_pnl
+                        row_id,   # ID baris di database
+                        "",   # posisi_ch (akan diupdate nanti)
+                        ""    # signal_ch (akan diupdate nanti)
+                    )
+            return row_id
+
+        except Exception as e:
+            logger.error(f"[ERROR] Gagal eksekusi open posisi untuk {symbol}: {e}", exc_info=True)
+            return None
+
+    def _vbot_close_position(self, symbol: str, reason: str = "Auto-close") -> Optional[int]:
+        conn = None
+        try:
+            conn = self._vbot_get_db_connection()
+            cursor = conn.cursor()
+
+            # Ambil data posisi dari database
+            cursor.execute("""
+                SELECT id, posisi, qty, price_open, binance_order_id
+                FROM view_td
+                WHERE symbol = ? AND status = 1
+            """, (symbol,))
+            row = cursor.fetchone()
+
+            if not row:
+                logger.warning(f"[CLOSE] Tidak ada posisi terbuka untuk {symbol}")
+                return None
+
+            row_id = row.id
+            position = row.posisi
+            qty = float(row.qty)
+            price_open = float(row.price_open)
+
+            # Eksekusi close order
+            order_side = "SELL" if position == "LONG" else "BUY"
+            logger.info(f"[CLOSE EXEC] Menutup posisi {position} {symbol}, qty={qty}")
+            order_result = self._vbot_execute_trade(symbol, order_side, qty)
+            
+            if not order_result:
+                logger.error(f"[CLOSE] Gagal mengeksekusi close order untuk {symbol}")
+                return None
+
+            # Proses harga close
+            price_close = float(order_result.get("avgPrice", 0.0))
+            if price_close <= 0:
+                fills = order_result.get("fills", [])
+                if fills:
+                    try:
+                        price_close = float(fills[0].get("price", 0.0))
+                        logger.debug(f"[CLOSE FALLBACK] fills digunakan: {price_close}")
+                    except Exception as e:
+                        logger.warning(f"[CLOSE FALLBACK ERROR] Gagal parsing fills price: {e}")
+                        price_close = 0.0
+
+            order_id_close = str(order_result.get("orderId", ""))
+
+            if price_close <= 0 or not order_id_close:
+                logger.error(f"[CLOSE ABORT] Data close tidak valid: price={price_close}, id={order_id_close}")
+                return None
+
+            # Hitung PnL
+            pnl = (price_close - price_open) * qty if position == "LONG" else (price_open - price_close) * qty
+
+            # Update database
+            update_query = """
+                UPDATE tran_TF
+                SET price_close = ?, 
+                    status = 2,
+                    binance_close_id = ?, 
+                    pnl_real = ?, 
+                    close_reason = ?, 
+                    timestamp = GETDATE()
+                WHERE id = ?
+            """
+            update_params = (price_close, order_id_close, pnl, reason, row_id)
+            cursor.execute(update_query, update_params)
+
+            if cursor.rowcount == 0:
+                logger.warning(f"[CLOSE FAIL] Gagal update close posisi di DB untuk ID={row_id}")
+                return None
+
+            conn.commit()
+            logger.info(f"[CLOSE DONE] {symbol} {position} ditutup @ {price_close:.5f}, PnL: {pnl:.5f}")
+            
+            # Hapus dari open positions
+            with self.position_lock:
+                if symbol in self.open_positions:
+                    del self.open_positions[symbol]
+                    
+            return row_id
+
+        except Exception as e:
+            logger.error(f"[ERROR] Gagal menutup posisi untuk {symbol}: {e}", exc_info=True)
+            return None
+        finally:
+            if conn:
+                conn.close()
+
+    def _vbot_round_qty(self, symbol: str, qty: float) -> float:
+        """Membulatkan quantity sesuai aturan LOT_SIZE simbol"""
+        symbol_info = self._vbot_get_symbol_info(symbol)
+        if not symbol_info:
+            return round(qty, 5)  # Default rounding
+        
+        lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
+        if not lot_size_filter:
+            return round(qty, 5)
+        
+        min_qty = float(lot_size_filter['minQty'])
+        step_size = float(lot_size_filter['stepSize'])
+        
+        if qty < min_qty:
+            return 0.0
+            
+        # Hitung jumlah step
+        steps = qty / step_size
+        rounded_steps = round(steps)  # Pembulatan ke integer terdekat
+        valid_qty = rounded_steps * step_size
+        
+        return round(valid_qty, 8)
+    # ===== END OF FUNGSI BARU =====
+
     def _vbot_load_open_positions(self):
-        """Memuat posisi terbuka (status=1) dari database"""
         conn = self._vbot_get_db_connection()
         if not conn:
             return
             
         try:
             cursor = conn.cursor()
-            # AMBIL DATA SINYAL (posisi_ch, signal_ch) JUGA
             cursor.execute("""
                 SELECT id, symbol, posisi, price_open, qty, leverage, binance_order_id, posisi_ch, signal_ch 
                 FROM view_td 
@@ -319,29 +474,21 @@ class FuturesTracker:
                 trade_id = row.id
                 symbol = row.symbol
                 position = row.posisi
-                
-                # Konversi Decimal ke float
                 price_open = float(row.price_open)
                 qty = float(row.qty)
-                
                 leverage = row.leverage
                 order_id = row.binance_order_id or "N/A"
                 posisi_ch = row.posisi_ch or ""
                 signal_ch = row.signal_ch or ""
-                
-                # Inisialisasi unrealized PnL dengan 0
                 unrealized_pnl = 0.0
                 
-                # Hitung initial PnL jika harga tersedia
                 if symbol in self.mark_prices and price_open > 0:
                     if position == "LONG":
                         unrealized_pnl = qty * (self.mark_prices[symbol] - price_open)
-                    else:  # SHORT
+                    else:
                         unrealized_pnl = qty * (price_open - self.mark_prices[symbol])
                 
-                # Simpan posisi BESERTA DATA SINYAL
                 self.open_positions[symbol] = (position, price_open, qty, leverage, order_id, unrealized_pnl, trade_id, posisi_ch, signal_ch)
-                
                 logger.info(f"Memuat posisi terbuka: {symbol} {position} @ {price_open}, qty={qty}, leverage={leverage}, order_id={order_id}, posisi_ch={posisi_ch}, signal_ch={signal_ch}")
                 
             logger.info(f"Memuat {len(self.open_positions)} posisi terbuka dari database")
@@ -373,7 +520,6 @@ class FuturesTracker:
             return set()
 
     def _vbot_fetch_symbols_from_db(self) -> List[Dict[str, Any]]:
-        """Ambil daftar simbol dan kolom lain dari stored procedure sp_tranTF_last"""
         conn = self._vbot_get_db_connection()
         if not conn:
             logger.error("Tidak dapat terhubung ke database untuk mengambil simbol")
@@ -386,10 +532,8 @@ class FuturesTracker:
             results = []
             for row in cursor.fetchall():
                 row_dict = dict(zip(columns, row))
-                # Pastikan konversi tipe data
                 if 'price_open' in row_dict and row_dict['price_open'] is not None:
                     row_dict['price_open'] = float(row_dict['price_open'])
-                # Tambahkan kolom baru
                 results.append(row_dict)
             logger.info(f"Memuat {len(results)} simbol dari database")
             return results
@@ -400,7 +544,6 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_get_account_balance(self):
-        """Dapatkan saldo total akun dari Binance"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
             logger.error("API Key/Secret Binance tidak ditemukan")
             return 0.0
@@ -409,7 +552,6 @@ class FuturesTracker:
             timestamp = int(time.time() * 1000)
             payload = {"timestamp": timestamp}
             
-            # Generate signature
             query_string = urllib.parse.urlencode(payload)
             signature = hmac.new(
                 self.BINANCE_API_SECRET.encode('utf-8'),
@@ -428,7 +570,6 @@ class FuturesTracker:
             )
             response.raise_for_status()
             
-            # Cari aset USDT
             for asset in response.json():
                 if asset['asset'] == 'USDT':
                     self.total_balance = float(asset['balance'])
@@ -442,7 +583,6 @@ class FuturesTracker:
             self.total_balance = 0.0
 
     def _vbot_get_position_risk(self):
-        """Dapatkan risiko posisi untuk menghitung margin yang digunakan"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
             logger.error("API Key/Secret Binance tidak ditemukan")
             return
@@ -451,7 +591,6 @@ class FuturesTracker:
             timestamp = int(time.time() * 1000)
             payload = {"timestamp": timestamp}
             
-            # Generate signature
             query_string = urllib.parse.urlencode(payload)
             signature = hmac.new(
                 self.BINANCE_API_SECRET.encode('utf-8'),
@@ -470,7 +609,6 @@ class FuturesTracker:
             )
             response.raise_for_status()
             
-            # Hitung total margin yang digunakan
             total_used_margin = 0.0
             for position in response.json():
                 if position['symbol'] in self.open_positions:
@@ -483,7 +621,6 @@ class FuturesTracker:
             self.used_margin = 0.0
 
     def _vbot_load_symbol_list(self):
-        # Ambil simbol dan data dari database menggunakan stored procedure
         symbols_data = self._vbot_fetch_symbols_from_db()
         if not symbols_data:
             sys.exit("Error: Tidak ada simbol dari database.")
@@ -493,8 +630,8 @@ class FuturesTracker:
             logger.warning("Gagal validasi simbol, menggunakan semua dari database.")
 
         validated_symbols = []
-        self.symbol_info_db = {}  # Reset data
-        self.last_db_data = {}    # Reset cache
+        self.symbol_info_db = {}
+        self.last_db_data = {}
         
         for data in symbols_data:
             symbol = data.get('symbol')
@@ -503,7 +640,6 @@ class FuturesTracker:
                 
             if not self.valid_symbols or symbol in self.valid_symbols:
                 validated_symbols.append(symbol)
-                # Simpan semua data ke symbol_info_db dan last_db_data
                 self.symbol_info_db[symbol] = data
                 self.last_db_data[symbol] = data
                 if len(validated_symbols) >= self.MAX_SYMBOLS:
@@ -515,8 +651,6 @@ class FuturesTracker:
         logger.info(f"Akan melacak {len(self.symbols)} simbol dengan data dari database.")
         
     def _vbot_periodic_symbol_reloader(self):
-        """Reload daftar simbol setiap kelipatan interval (15 menit)"""
-        # Konversi interval ke detik
         interval_seconds = self._vbot_interval_to_seconds(self.INTERVAL)
         if interval_seconds <= 0:
             logger.error(f"Interval {self.INTERVAL} tidak valid")
@@ -524,9 +658,7 @@ class FuturesTracker:
 
         while not self.shutdown_event.is_set():
             now = datetime.utcnow()
-            # Hitung detik menuju kelipatan interval berikutnya
             next_time = now + timedelta(seconds=interval_seconds)
-            # Bulatkan ke interval berikutnya (dengan menit:0, detik:0)
             next_time = next_time.replace(minute=(next_time.minute // (interval_seconds//60)) * (interval_seconds//60), second=0, microsecond=0)
             wait_seconds = (next_time - now).total_seconds()
             
@@ -534,19 +666,16 @@ class FuturesTracker:
                 wait_seconds = interval_seconds
 
             logger.info(f"Menunggu {wait_seconds} detik hingga reload simbol berikutnya pada {next_time}")
-            # Tunggu hingga waktu berikutnya, atau shutdown event
             self.shutdown_event.wait(wait_seconds)
             if self.shutdown_event.is_set():
                 break
 
-            # Lakukan reload
             logger.info("Memulai reload daftar simbol...")
             new_symbols_data = self._vbot_fetch_symbols_from_db()
             if not new_symbols_data:
                 logger.warning("Gagal reload simbol dari database")
                 continue
 
-            # Validasi simbol baru
             validated_new_symbols = []
             new_symbol_info = {}
             
@@ -561,7 +690,6 @@ class FuturesTracker:
                     if len(validated_new_symbols) >= self.MAX_SYMBOLS:
                         break
 
-            # Bandingkan dengan simbol saat ini
             with self.reload_lock:
                 if set(validated_new_symbols) != set(self.symbols) or any(
                     self.symbol_info_db.get(s) != new_symbol_info.get(s) for s in validated_new_symbols
@@ -569,14 +697,12 @@ class FuturesTracker:
                     logger.info("Perubahan daftar simbol atau data terdeteksi, melakukan reload...")
                     self.symbols = validated_new_symbols
                     self.symbol_info_db = new_symbol_info
-                    # Set flag untuk reload di dashboard
                     self.symbols_reload_needed = True
                     logger.info(f"Reload simbol selesai. Sekarang melacak {len(self.symbols)} simbol.")
                 else:
                     logger.info("Tidak ada perubahan pada daftar simbol.")
 
     def _vbot_periodic_db_reloader(self):
-        """Reload data dari stored procedure setiap 12 detik"""
         while not self.shutdown_event.is_set():
             time.sleep(self.DB_RELOAD_INTERVAL)
             if self.shutdown_event.is_set():
@@ -588,20 +714,15 @@ class FuturesTracker:
                 logger.warning("Gagal reload data dari database")
                 continue
                 
-            # Buat mapping: symbol -> data
             new_data_map = {item['symbol']: item for item in new_data}
             
             with self.reload_lock:
-                # Update hanya untuk simbol yang sedang dilacak
                 for symbol in self.symbols:
                     if symbol in new_data_map:
                         new_info = new_data_map[symbol]
                         old_info = self.last_db_data.get(symbol, {})
-                        
-                        # Simpan price_open lama sebelum pembaruan
                         old_price_open = old_info.get('price_open', 0.0)
                         
-                        # Periksa perubahan pada field kunci
                         fields_to_check = ['id', 'posisi', 'price_open', 'posisi_ch', 'signal_ch']
                         changed = False
                         changes_log = []
@@ -612,7 +733,6 @@ class FuturesTracker:
                                 changed = True
                                 changes_log.append(f"{field}: {old_val} -> {new_val}")
                         
-                        # Jika price_open baru kosong atau 0, gunakan yang lama
                         if new_info.get('price_open') in (None, 0.0) and old_price_open > 0:
                             new_info['price_open'] = old_price_open
                             if 'price_open' in changes_log:
@@ -621,38 +741,30 @@ class FuturesTracker:
                                     changed = False
                             logger.warning(f"Perbaikan price_open untuk {symbol}: menggunakan nilai lama {old_price_open}")
                         
-                        # Skip update jika price_open masih 0
                         if new_info.get('price_open') == 0.0:
                             logger.warning(f"Ignore update {symbol}: price_open=0")
                             continue
                             
                         if changed:
                             logger.info(f"Perubahan data untuk {symbol}: {', '.join(changes_log)}")
-                            # Update cache terakhir
                             self.last_db_data[symbol] = new_info
-                            # Update data yang digunakan di aplikasi
                             self.symbol_info_db[symbol] = new_info
                             
-                            # Jika simbol ini ada di posisi terbuka, update juga data sinyal di open_positions
                             with self.position_lock:
                                 if symbol in self.open_positions:
-                                    # Unpack tuple lama
                                     (position, entry_price, qty, leverage, order_id, unrealized_pnl, trade_id, _, _) = self.open_positions[symbol]
-                                    # Update dengan data sinyal baru
                                     new_posisi_ch = new_info.get('posisi_ch', '')
                                     new_signal_ch = new_info.get('signal_ch', '')
                                     self.open_positions[symbol] = (
                                         position, entry_price, qty, leverage, order_id, unrealized_pnl, trade_id, new_posisi_ch, new_signal_ch
                                     )
                                     logger.info(f"Update sinyal untuk posisi terbuka {symbol}: posisi_ch={new_posisi_ch}, signal_ch={new_signal_ch}")
-                        # Jika belum ada cache (pertama kali), isi cache
                         elif symbol not in self.last_db_data:
                             self.last_db_data[symbol] = new_info
                             self.symbol_info_db[symbol] = new_info
             logger.info("Reload data selesai.")
 
     def _vbot_interval_to_seconds(self, interval: str) -> int:
-        """Convert interval string to seconds"""
         unit = interval[-1]
         if unit == 'm':
             return int(interval[:-1]) * 60
@@ -689,18 +801,16 @@ class FuturesTracker:
                     'funding_rate': 0, 
                     'open_interest': 0,
                     'oi_usd': 0,
-                    'prev_oi_usd': 0,  # Simpan OI USD periode sebelumnya
+                    'prev_oi_usd': 0,
                     'last_update': datetime.utcnow(),
                 }
                 self.last_prices[symbol] = 0.0
                 self.mark_prices[symbol] = 0.0
                 self.previous_oi[symbol] = 0.0
                 self.liquidation_history[symbol] = deque(maxlen=1000)
-                # Inisialisasi cache threshold
                 self.volatility_cache[symbol] = 0.0
-                self.spread_threshold_cache[symbol] = 0.002  # Default value
+                self.spread_threshold_cache[symbol] = 0.002
                 self.threshold_last_updated[symbol] = 0.0
-                # Inisialisasi cache burst threshold
                 self.burst_threshold_cache[symbol] = {'buy': 0.0, 'sell': 0.0}
                 self.burst_threshold_last_updated[symbol] = 0.0
         logger.info("Inisialisasi struktur data selesai.")
@@ -733,7 +843,6 @@ class FuturesTracker:
         funding_data = self._vbot_fetch_api_data(self.PREMIUM_INDEX_URL, {"symbol": symbol})
 
         with self.data_lock:
-            # Simpan OI USD saat ini sebagai OI periode berikutnya
             current_oi_usd = self.display_data[symbol].get('oi_usd', 0)
             self.display_data[symbol]['prev_oi_usd'] = current_oi_usd
             
@@ -751,7 +860,7 @@ class FuturesTracker:
 
     def _vbot_periodic_data_updater(self):
         while not self.shutdown_event.is_set():
-            time.sleep(60)  # Cek setiap 60 detik
+            time.sleep(60)
             logger.info("Memulai pembaruan data periodik...")
             for symbol in self.symbols:
                 if self.shutdown_event.is_set(): break
@@ -771,30 +880,26 @@ class FuturesTracker:
             logger.info("Pembaruan data periodik selesai.")
     
     def _vbot_websocket_connector(self, url: str, stream_name: str, handler_func):
-        """Konektor WebSocket yang lebih tangguh dengan backoff eksponensial"""
-        backoff = 1  # Backoff awal 1 detik
+        backoff = 1
         while not self.shutdown_event.is_set():
             try:
                 logger.info(f"Membuka koneksi WebSocket untuk {stream_name}...")
-                # Tambahkan timeout dan SSL context untuk koneksi lebih stabil
                 ws = create_connection(
                     url, 
                     timeout=10,
-                    sslopt={"cert_reqs": ssl.CERT_NONE}  # Nonaktifkan verifikasi sertifikat
+                    sslopt={"cert_reqs": ssl.CERT_NONE}
                 )
                 logger.info(f"Koneksi WebSocket {stream_name} berhasil.")
-                backoff = 1  # Reset backoff setelah koneksi berhasil
+                backoff = 1
                 
                 while not self.shutdown_event.is_set():
                     try:
-                        # Gunakan select untuk timeout operasi recv
-                        r, _, _ = select.select([ws.sock], [], [], 30)  # Timeout 30 detik
+                        r, _, _ = select.select([ws.sock], [], [], 30)
                         if r:
                             msg = ws.recv()
                             if msg: 
                                 handler_func(json.loads(msg))
-                        # Else: timeout, lanjutkan loop
-                    except socket.timeout:  # Tangkap error timeout khusus
+                    except socket.timeout:
                         logger.warning(f"Timeout sementara di {stream_name}, melanjutkan...")
                         continue
                     except (WebSocketConnectionClosedException, ConnectionResetError) as e:
@@ -805,11 +910,10 @@ class FuturesTracker:
                         time.sleep(1)
             except Exception as e:
                 logger.error(f"Error WebSocket {stream_name}: {e}")
-                # Backoff eksponensial
                 sleep_time = min(backoff, self.WS_RECONNECT_BACKOFF_MAX)
                 logger.info(f"Menunggu {sleep_time} detik sebelum mencoba kembali koneksi {stream_name}")
                 time.sleep(sleep_time)
-                backoff *= 2  # Double backoff time
+                backoff *= 2
             finally:
                 try:
                     if 'ws' in locals() and ws.connected:
@@ -832,12 +936,10 @@ class FuturesTracker:
             self.trade_queue.put(data.get('data', {}))
 
     def _vbot_handle_depth_stream(self, data):
-        # Skip pemrosesan jika antrian sudah penuh
         if self.depth_queue.qsize() > 100:  
             return   
-        self.depth_queue.put(data)  # Masukkan ke antrian baru
+        self.depth_queue.put(data)
 
-    # Thread processor khusus:
     def _vbot_depth_processor(self):
         while not self.shutdown_event.is_set():
             try:
@@ -869,21 +971,14 @@ class FuturesTracker:
                             oi_value = self.display_data[symbol].get('open_interest', 0)
                             self.display_data[symbol]['oi_usd'] = oi_value * mark_price
                     
-                    # Perbarui unrealized PnL untuk posisi terbuka
                     with self.position_lock:
                         if symbol in self.open_positions:
                             position, entry_price, qty, leverage, order_id, _, db_id, db_posisi, db_signal_ch = self.open_positions[symbol]
-                            
-                            # Hitung nilai posisi dalam USDT
                             position_value = qty * entry_price
-                            
-                            # Hitung unrealized PnL berdasarkan mark price
                             if position == "LONG":
                                 unrealized_pnl = qty * (mark_price - entry_price)
-                            else:  # SHORT
+                            else:
                                 unrealized_pnl = qty * (entry_price - mark_price)
-                            
-                            # Simpan PnL baru
                             self.open_positions[symbol] = (position, entry_price, qty, leverage, order_id, unrealized_pnl, db_id, db_posisi, db_signal_ch)
 
     def _vbot_liquidation_processor(self):
@@ -925,9 +1020,7 @@ class FuturesTracker:
                 logger.error(f"Error prosesor perdagangan: {e}")
     
     def _vbot_get_volatility_and_threshold(self, symbol: str) -> Tuple[float, float]:
-        """Dapatkan volatility dan spread threshold dari database"""
         current_time = time.time()
-        # Cek cache terlebih dahulu (cache berlaku 5 menit)
         if current_time - self.threshold_last_updated.get(symbol, 0) < 300:
             return self.volatility_cache.get(symbol, 0.0), self.spread_threshold_cache.get(symbol, 0.002)
         
@@ -937,14 +1030,12 @@ class FuturesTracker:
             
         try:
             cursor = conn.cursor()
-            # Eksekusi stored procedure
             cursor.execute("EXEC sp_calculate_spread_threshold @symbol=?, @rows=?, @multiplier=?", 
                            (symbol, 20, 2.5))
             row = cursor.fetchone()
             if row:
                 volatility = float(row.volatility)
                 spread_threshold = float(row.spread_threshold)
-                # Update cache
                 with self.data_lock:
                     self.volatility_cache[symbol] = volatility
                     self.spread_threshold_cache[symbol] = spread_threshold
@@ -961,9 +1052,7 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_get_burst_threshold(self, symbol: str) -> Tuple[float, float]:
-        """Dapatkan burst threshold dari stored procedure sp_burst_liquidation_threshold"""
         current_time = time.time()
-        # Cek cache terlebih dahulu (cache berlaku 5 menit)
         if current_time - self.burst_threshold_last_updated.get(symbol, 0) < 300:
             cache = self.burst_threshold_cache.get(symbol, {})
             return cache.get('buy', 0.0), cache.get('sell', 0.0)
@@ -974,13 +1063,11 @@ class FuturesTracker:
             
         try:
             cursor = conn.cursor()
-            # Eksekusi stored procedure
             cursor.execute("EXEC sp_burst_liquidation_threshold @symbol=?, @days_back=3, @sensitivity=2.5", (symbol,))
             row = cursor.fetchone()
             if row:
                 buy_threshold = float(row.burst_buy_threshold)
                 sell_threshold = float(row.burst_sell_threshold)
-                # Update cache
                 with self.data_lock:
                     self.burst_threshold_cache[symbol] = {
                         'buy': buy_threshold,
@@ -999,7 +1086,6 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_get_symbol_info(self, symbol: str) -> Optional[Dict]:
-        """Dapatkan info simbol untuk validasi harga dan quantity"""
         if symbol in self.symbol_info_cache:
             return self.symbol_info_cache[symbol]
             
@@ -1017,7 +1103,6 @@ class FuturesTracker:
             return None
 
     def _vbot_set_margin_mode(self, symbol: str) -> bool:
-        """Atur margin mode (ISOLATED/CROSSED) untuk simbol"""
         try:
             timestamp = int(time.time() * 1000)
             payload = {
@@ -1026,7 +1111,6 @@ class FuturesTracker:
                 "timestamp": timestamp
             }
             
-            # Generate signature menggunakan query string
             query_string = urllib.parse.urlencode(payload)
             signature = hmac.new(
                 self.BINANCE_API_SECRET.encode('utf-8'),
@@ -1037,7 +1121,6 @@ class FuturesTracker:
 
             headers = {"X-MBX-APIKEY": self.BINANCE_API_KEY}
             
-            # Kirim sebagai query parameter (bukan form data)
             response = self.session.post(
                 "https://fapi.binance.com/fapi/v1/marginType",
                 headers=headers,
@@ -1045,13 +1128,12 @@ class FuturesTracker:
                 timeout=5
             )
             
-            # Tangani response khusus
             if response.status_code == 400:
                 error_data = response.json()
-                if error_data.get('code') == -4046:  # Margin type sudah sesuai
+                if error_data.get('code') == -4046:
                     logger.info(f"Margin mode sudah {self.MARGIN_MODE} untuk {symbol}")
                     return True
-                if error_data.get('code') == -4047:  # Ada posisi terbuka
+                if error_data.get('code') == -4047:
                     logger.warning(f"Tidak bisa ubah margin type untuk {symbol} karena ada posisi terbuka")
                     return False
             
@@ -1063,7 +1145,6 @@ class FuturesTracker:
             return False
 
     def _vbot_set_leverage(self, symbol: str) -> bool:
-        """Atur leverage untuk simbol tertentu di Binance"""
         try:
             timestamp = int(time.time() * 1000)
             payload = {
@@ -1072,7 +1153,6 @@ class FuturesTracker:
                 "timestamp": timestamp
             }
             
-            # Generate signature
             query_string = urllib.parse.urlencode(payload)
             signature = hmac.new(
                 self.BINANCE_API_SECRET.encode('utf-8'),
@@ -1083,7 +1163,6 @@ class FuturesTracker:
 
             headers = {"X-MBX-APIKEY": self.BINANCE_API_KEY}
             
-            # Kirim sebagai query parameter
             response = self.session.post(
                 "https://fapi.binance.com/fapi/v1/leverage",
                 headers=headers,
@@ -1091,10 +1170,9 @@ class FuturesTracker:
                 timeout=5
             )
             
-            # Tangani error khusus
             if response.status_code == 400:
                 error_data = response.json()
-                if error_data.get('code') == -4046:  # Leverage sudah sesuai
+                if error_data.get('code') == -4046:
                     logger.info(f"Leverage sudah {self.LEVERAGE}x untuk {symbol}")
                     return True
             
@@ -1106,13 +1184,11 @@ class FuturesTracker:
             return False
 
     def _vbot_execute_trade(self, symbol: str, side: str, qty: float) -> Optional[Dict]:
-        """Eksekusi order market di Binance Futures"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
             logger.error("API Key/Secret Binance tidak ditemukan")
             return None
 
         try:
-            # Validasi quantity menggunakan LOT_SIZE filter
             symbol_info = self._vbot_get_symbol_info(symbol)
             if symbol_info:
                 lot_size_filter = next((f for f in symbol_info['filters'] if f['filterType'] == 'LOT_SIZE'), None)
@@ -1120,12 +1196,10 @@ class FuturesTracker:
                     min_qty = float(lot_size_filter['minQty'])
                     step_size = float(lot_size_filter['stepSize'])
                     
-                    # Validasi minimum quantity
                     if qty < min_qty:
                         logger.warning(f"Qty {qty:.6f} < minimum {min_qty} untuk {symbol}")
                         return None
                     
-                    # Adjust quantity to step size
                     valid_qty = round(round(qty / step_size) * step_size, 8)
                     if valid_qty < min_qty:
                         logger.warning(f"Qty adjusted {valid_qty:.6f} < minimum {min_qty}")
@@ -1135,19 +1209,15 @@ class FuturesTracker:
             else:
                 logger.warning(f"Info simbol {symbol} tidak ditemukan, menggunakan qty asli")
                 
-            # Hitung timestamp
             timestamp = int(time.time() * 1000)
-            
-            # Persiapkan payload
             payload = {
                 "symbol": symbol,
                 "side": side,
                 "type": "MARKET",
-                "quantity": round(qty, 5),  # Bulatkan ke 5 desimal
+                "quantity": round(qty, 5),
                 "timestamp": timestamp
             }
 
-            # Generate signature
             query_string = urllib.parse.urlencode(payload)
             signature = hmac.new(
                 self.BINANCE_API_SECRET.encode('utf-8'),
@@ -1156,7 +1226,6 @@ class FuturesTracker:
             ).hexdigest()
             payload["signature"] = signature
 
-            # Kirim request
             headers = {"X-MBX-APIKEY": self.BINANCE_API_KEY}
             response = self.session.post(
                 "https://fapi.binance.com/fapi/v1/order",
@@ -1165,9 +1234,48 @@ class FuturesTracker:
                 timeout=10
             )
             response.raise_for_status()
-            return response.json()
+            order_result = response.json()
+
+            # Fallback untuk avgPrice dan executedQty
+            avg_price_str = order_result.get("avgPrice")
+            executed_qty_str = order_result.get("executedQty")
+            avg_price = 0.0
+            executed_qty = 0.0
+            try:
+                avg_price = float(avg_price_str) if avg_price_str else 0.0
+            except (TypeError, ValueError):
+                pass
+            try:
+                executed_qty = float(executed_qty_str) if executed_qty_str else 0.0
+            except (TypeError, ValueError):
+                pass
+
+            if avg_price <= 0 or executed_qty <= 0:
+                fills = order_result.get("fills", [])
+                if fills:
+                    first_fill = fills[0]
+                    fill_price_str = first_fill.get("price")
+                    fill_qty_str = first_fill.get("qty")
+                    if fill_price_str:
+                        try:
+                            fill_price = float(fill_price_str)
+                            if fill_price > 0 and avg_price <= 0:
+                                order_result["avgPrice"] = fill_price_str
+                                logger.warning(f"Fallback: avgPrice diisi dari fills[0] -> {fill_price} untuk order {order_result.get('orderId')}")
+                        except (TypeError, ValueError) as e:
+                            logger.error(f"Error konversi fill_price: {e}")
+
+                    if fill_qty_str:
+                        try:
+                            fill_qty = float(fill_qty_str)
+                            if fill_qty > 0 and executed_qty <= 0:
+                                order_result["executedQty"] = fill_qty_str
+                                logger.warning(f"Fallback: executedQty diisi dari fills[0] -> {fill_qty} untuk order {order_result.get('orderId')}")
+                        except (TypeError, ValueError) as e:
+                            logger.error(f"Error konversi fill_qty: {e}")
+
+            return order_result
         except Exception as e:
-            # Tambahkan log untuk melihat pesan error dari Binance
             if hasattr(e, 'response') and e.response is not None:
                 try:
                     error_data = e.response.json()
@@ -1178,26 +1286,21 @@ class FuturesTracker:
             return None
 
     def _vbot_trading_executor(self):
-        """Thread untuk eksekusi trading berdasarkan sinyal"""
         while not self.shutdown_event.is_set():
             try:
-                # Tunggu sinyal trading dari queue
                 symbol, action, mark_price = self.trading_queue.get(timeout=1)
                 logger.info(f"Memulai proses trading untuk {symbol} {action} @ {mark_price}")
                 
-                # Cek apakah trading aktif
                 if not self.trading_active:
                     logger.info("Trading dinonaktifkan, lewati eksekusi")
                     continue
                 
-                # Cegah eksekusi ganda
                 with self.processing_lock:
                     if symbol in self.processing_symbols:
                         logger.info(f"Ignore {symbol}: Sedang diproses")
                         continue
                     self.processing_symbols.add(symbol)
                 
-                # Periksa apakah sudah ada posisi terbuka
                 with self.position_lock:
                     if symbol in self.open_positions:
                         logger.info(f"Ignore {symbol}: Sudah ada posisi {self.open_positions[symbol][0]}")
@@ -1205,14 +1308,12 @@ class FuturesTracker:
                             self.processing_symbols.discard(symbol)
                         continue
                 
-                # Periksa apakah ada pending order untuk simbol ini
                 if self._vbot_has_pending_order(symbol):
                     logger.info(f"Ignore {symbol}: Ada pending order")
                     with self.processing_lock:
                         self.processing_symbols.discard(symbol)
                     continue
                 
-                # Pastikan simbol masih ada di daftar aktif
                 with self.reload_lock:
                     if symbol not in self.symbols:
                         logger.info(f"Ignore {symbol}: Tidak ada di daftar aktif")
@@ -1220,14 +1321,10 @@ class FuturesTracker:
                             self.processing_symbols.discard(symbol)
                         continue
                 
-                # Perbarui saldo dan margin
                 self._vbot_get_account_balance()
                 self._vbot_get_position_risk()
-                
-                # Hitung margin yang tersedia
                 available_margin = max(0, self.total_balance - self.used_margin)
                 
-                # Cek batas maksimal open posisi
                 with self.position_lock:
                     current_open_count = len(self.open_positions)
                 if current_open_count >= self.MAX_OPEN_POSITIONS:
@@ -1236,7 +1333,6 @@ class FuturesTracker:
                         self.processing_symbols.discard(symbol)
                     continue
                 
-                # Jika margin yang tersedia tidak mencukupi
                 required_margin = self.BALANCE_PER_SYMBOL * self.SAFETY_MARGIN
                 if available_margin < required_margin:
                     logger.warning(
@@ -1248,59 +1344,47 @@ class FuturesTracker:
                         self.processing_symbols.discard(symbol)
                     continue
                 
-                # 0. Atur margin mode dan leverage dengan retry
                 if symbol not in self.leverage_set:
                     MAX_RETRIES = 3
                     success = False
-                    
                     for attempt in range(MAX_RETRIES):
                         if self._vbot_set_margin_mode(symbol) and self._vbot_set_leverage(symbol):
                             success = True
                             break
-                        time.sleep(2)  # Tunggu sebelum retry
+                        time.sleep(2)
                     
                     if success:
                         self.leverage_set.add(symbol)
-                        time.sleep(0.5)  # Beri waktu untuk Binance memproses
+                        time.sleep(0.5)
                     else:
                         logger.error(f"Gagal atur leverage setelah {MAX_RETRIES} percobaan, skip {symbol}")
                         with self.processing_lock:
                             self.processing_symbols.discard(symbol)
                         continue
                 
-                # Pastikan price_open valid (tidak 0) dan sinyal masih aktif
                 with self.reload_lock:
                     db_info = self.symbol_info_db.get(symbol, {})
                 price_open = db_info.get('price_open', 0.0)
                 signal_score = db_info.get('signal_score', 0)
                 
-                # Validasi akhir sebelum eksekusi
                 if price_open <= 0 or signal_score == 0:
                     logger.warning(f"Signal tidak valid untuk {symbol}: price_open={price_open}, signal_score={signal_score}")
                     with self.processing_lock:
                         self.processing_symbols.discard(symbol)
                     continue
                 
-                # 1. Hitung harga estimasi dengan mempertimbangkan slippage terburuk
-                # Untuk menjamin margin cukup, gunakan worst-case scenario
                 if action == "LONG":
-                    # Untuk LONG: harga terburuk adalah harga lebih tinggi (slippage positif)
                     worst_case_price = mark_price * (1 + self.SLIPPAGE_TOLERANCE)
-                else:  # SHORT
-                    # Untuk SHORT: harga terburuk adalah harga lebih rendah (slippage negatif)
+                else:
                     worst_case_price = mark_price * (1 - self.SLIPPAGE_TOLERANCE)
                 
-                # 2. Hitung kuantitas berdasarkan worst-case scenario dengan safety margin
                 allocated_balance = min(
                     self.BALANCE_PER_SYMBOL * self.SAFETY_MARGIN,
                     available_margin
                 )
                 qty = (allocated_balance * self.LEVERAGE) / worst_case_price
-                
-                # 3. Tentukan sisi order
                 order_side = "BUY" if action == "LONG" else "SELL"
                 
-                # 4. Eksekusi order di Binance
                 logger.info(f"Eksekusi {action} untuk {symbol} @ {mark_price:.5f}, qty={qty:.5f} (worst-case: {worst_case_price:.5f})")
                 order_result = self._vbot_execute_trade(symbol, order_side, qty)
                 
@@ -1308,14 +1392,12 @@ class FuturesTracker:
                     order_id = str(order_result["orderId"])
                     execution_price = float(order_result["avgPrice"])
                     
-                    # Pastikan harga eksekusi valid
                     if execution_price <= 0:
                         logger.error(f"Execution price tidak valid: {execution_price}")
                         with self.processing_lock:
                             self.processing_symbols.discard(symbol)
                         continue
                     
-                    # 5. Hitung dan log slippage aktual
                     if action == "LONG":
                         slippage = (execution_price - mark_price) / mark_price
                     else:
@@ -1329,18 +1411,14 @@ class FuturesTracker:
                     else:
                         logger.info(slippage_msg)
                     
-                    # 6. Hitung ulang quantity jika perlu (dengan harga real)
                     real_qty = min(qty, (allocated_balance * self.LEVERAGE) / execution_price)
-                    
-                    # 7. Dapatkan data terbaru dari DB untuk disimpan di open_positions
                     db_posisi_ch = db_info.get('posisi_ch', '')
                     db_signal_ch = db_info.get('signal_ch', '')
                     
-                    # 8. Simpan ke database
                     success_id = self._vbot_save_trade_to_db(
                         symbol, 
                         execution_price, 
-                        action,  # Parameter position ditambahkan
+                        action,
                         real_qty, 
                         self.LEVERAGE, 
                         order_id
@@ -1354,10 +1432,10 @@ class FuturesTracker:
                                 real_qty, 
                                 self.LEVERAGE, 
                                 order_id, 
-                                0.0,   # unrealized_pnl
-                                success_id,   # ID baris di database
-                                db_posisi_ch,   # posisi_ch
-                                db_signal_ch    # signal_ch
+                                0.0,
+                                success_id,
+                                db_posisi_ch,
+                                db_signal_ch
                             )
                             self.processing_symbols.discard(symbol)
                             logger.info(f"Posisi {action} dibuka untuk {symbol} dengan order ID {order_id} dan database ID {success_id}")
@@ -1372,11 +1450,8 @@ class FuturesTracker:
                     self.processing_symbols.discard(symbol)
 
     def _vbot_position_monitor(self):
-        """Thread untuk memantau dan menutup posisi berdasarkan perubahan sinyal"""
         while not self.shutdown_event.is_set():
-            time.sleep(5)  # Cek setiap 5 detik
-            
-            # Buat salinan posisi terbuka untuk menghindari deadlock
+            time.sleep(5)
             positions_to_check = []
             with self.position_lock:
                 positions_to_check = list(self.open_positions.items())
@@ -1386,11 +1461,9 @@ class FuturesTracker:
                 
             for symbol, position_data in positions_to_check:
                 try:
-                    # Unpack data
                     (position, entry_price, qty, leverage, order_id, unrealized_pnl, 
                      open_db_id, open_db_posisi, open_db_signal_ch) = position_data
                     
-                    # Dapatkan data terbaru dari symbol_info_db
                     with self.reload_lock:
                         current_info = self.symbol_info_db.get(symbol, {})
                     if not current_info:
@@ -1400,14 +1473,9 @@ class FuturesTracker:
                     current_signal_ch = current_info.get('signal_ch', '')
                     current_db_id = current_info.get('id', 0)
                     
-                    # Tutup posisi jika terjadi perubahan pada posisi_ch atau signal_ch
                     close_position = False
                     close_reason = ""
                     
-                    # Perubahan terjadi jika:
-                    # 1. Ada perubahan pada posisi (LONG -> SHORT atau sebaliknya)
-                    # 2. Ada perubahan pada signal_ch (misal BUY -> SELL)
-                    # 3. ID baris database berubah (artinya ada update baru)
                     if (current_posisi != open_db_posisi or 
                         current_signal_ch != open_db_signal_ch or
                         current_db_id != open_db_id):
@@ -1420,17 +1488,12 @@ class FuturesTracker:
                         )
                     
                     if close_position:
-                        # Tentukan sisi order untuk close (kebalikan dari open)
                         close_side = "SELL" if position == "LONG" else "BUY"
-                        
-                        # Eksekusi close di Binance
                         close_result = self._vbot_execute_trade(symbol, close_side, qty)
                         
                         if close_result and close_result.get("orderId"):
                             close_id = str(close_result["orderId"])
                             close_price = float(close_result["avgPrice"])
-                            
-                            # Update database menggunakan ID baris
                             success = self._vbot_update_trade_in_db(open_db_id, close_price, close_id, close_reason)
                             if success:
                                 with self.position_lock:
@@ -1443,29 +1506,23 @@ class FuturesTracker:
                     logger.error(f"Error pada monitor posisi {symbol}: {e}")
 
     def _vbot_leverage_retry_manager(self):
-        """Thread khusus untuk retry setting leverage"""
         while not self.shutdown_event.is_set():
             try:
                 symbol = self.leverage_retry_queue.get(timeout=60)
                 logger.info(f"Retrying leverage setup for {symbol}")
-                
                 if self._vbot_set_margin_mode(symbol) and self._vbot_set_leverage(symbol):
                     self.leverage_set.add(symbol)
                     logger.info(f"Leverage setup berhasil untuk {symbol} setelah retry")
                 else:
-                    # Masukkan kembali ke antrian untuk coba lagi nanti
                     self.leverage_retry_queue.put(symbol)
                     logger.info(f"Leverage setup gagal untuk {symbol}, dimasukkan kembali ke antrian")
-                    
             except queue.Empty:
                 pass
 
     def _vbot_get_pending_orders(self) -> List[Dict]:
-        """Ambil semua pending order dari database (status=2)"""
         conn = self._vbot_get_db_connection()
         if not conn:
             return []
-            
         try:
             cursor = conn.cursor()
             cursor.execute("""
@@ -1482,7 +1539,6 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_update_pending_order(self, order_id_db: int, execution_price: float, qty: float, binance_order_id: str) -> bool:
-        """Update pending order setelah dieksekusi dengan lengkap"""
         if execution_price <= 0 or qty <= 0:
             logger.error(f"[ABORT] execution_price tidak valid (={execution_price}) atau qty tidak valid (={qty}) saat update pending order ID={order_id_db}")
             return False
@@ -1490,10 +1546,8 @@ class FuturesTracker:
         conn = self._vbot_get_db_connection()
         if not conn:
             return False
-            
         try:
             cursor = conn.cursor()
-            # Ambil simbol dari order
             cursor.execute("SELECT symbol FROM view_td WHERE id = ?", (order_id_db,))
             row = cursor.fetchone()
             if not row:
@@ -1501,31 +1555,26 @@ class FuturesTracker:
                 return False
             symbol = row[0]
             
-            # Ambil data sinyal terbaru dari cache aplikasi
             with self.reload_lock:
                 current_info = self.symbol_info_db.get(symbol, {})
             current_signal_score = current_info.get('signal_score', 0)
             current_posisi_ch = current_info.get('posisi_ch', '')
             current_signal_ch = current_info.get('signal_ch', '')
             
-            # Ambil posisi untuk perhitungan SL/TP
             cursor.execute("SELECT posisi FROM view_td WHERE id = ?", (order_id_db,))
             row = cursor.fetchone()
             if not row:
                 return False
             position = row[0]
             
-            # Hitung ulang SL/TP berdasarkan harga eksekusi
             if position == "LONG":
-                stop_loss = execution_price * 0.99  # -1%
-                take_profit = execution_price * 1.03  # +3%
-            else:  # SHORT
-                stop_loss = execution_price * 1.01  # +1%
-                take_profit = execution_price * 0.97  # -3%
+                stop_loss = execution_price * 0.99
+                take_profit = execution_price * 1.03
+            else:
+                stop_loss = execution_price * 1.01
+                take_profit = execution_price * 0.97
                 
-            fee = execution_price * qty * 0.0004  # Fee 0.04%
-
-            # Gunakan leverage yang sebenarnya dari class
+            fee = execution_price * qty * 0.0004
             leverage = self.LEVERAGE
 
             logger.info(
@@ -1544,13 +1593,13 @@ class FuturesTracker:
                     take_profit = ?,
                     feebinance = ?,
                     status = 1,
-                    signal_score = ?   -- GUNAKAN NILAI TERBARU
+                    signal_score = ?
                 WHERE id = ?
             """
             params = (
                 execution_price, qty, leverage, binance_order_id,
                 stop_loss, take_profit, fee, 
-                current_signal_score, order_id_db # Data sinyal terbaru
+                current_signal_score, order_id_db
             )
             cursor.execute(query, params)
             conn.commit()
@@ -1567,7 +1616,6 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_execute_pending_order(self, symbol: str, position: str, target_price: float, order_id_db: int):
-        # Cek batas open posisi
         with self.position_lock:
             current_open_count = len(self.open_positions)
         if current_open_count >= self.MAX_OPEN_POSITIONS:
@@ -1575,18 +1623,13 @@ class FuturesTracker:
             self.pending_orders.discard(order_id_db)
             return
         
-        # Dapatkan harga mark saat ini
         with self.data_lock:
             mark_price = self.mark_prices.get(symbol, 0.0)
         
-        # Hitung kuantitas berdasarkan harga target
         allocated_balance = self.BALANCE_PER_SYMBOL * self.SAFETY_MARGIN
         qty = (allocated_balance * self.LEVERAGE) / target_price
-        
-        # Tentukan sisi order
         order_side = "BUY" if position == "LONG" else "SELL"
         
-        # Eksekusi order di Binance dengan retry
         max_retries = 3
         for attempt in range(max_retries):
             logger.info(
@@ -1599,30 +1642,25 @@ class FuturesTracker:
                 order_id = str(order_result["orderId"])
                 execution_price = float(order_result["avgPrice"])
                 executed_qty = float(order_result["executedQty"])
-                
-                # Gunakan executed_qty untuk update database
                 success = self._vbot_update_pending_order(order_id_db, execution_price, executed_qty, order_id)
                 
                 if success:
-                    # Dapatkan data terbaru untuk disimpan di open_positions
                     with self.reload_lock:
                         db_info = self.symbol_info_db.get(symbol, {})
                     db_posisi_ch = db_info.get('posisi_ch', '')
                     db_signal_ch = db_info.get('signal_ch', '')
-                    
                     with self.position_lock:
                         self.open_positions[symbol] = (
                             position, 
                             execution_price, 
-                            executed_qty,  # Gunakan qty yang dieksekusi
+                            executed_qty, 
                             self.LEVERAGE, 
                             order_id, 
-                            0.0,   # unrealized_pnl
-                            order_id_db,  # Simpan ID baris database
+                            0.0,
+                            order_id_db,
                             db_posisi_ch,
                             db_signal_ch
                         )
-                    
                     logger.info(
                         f"Pending order dieksekusi: {symbol} {position} @ {execution_price:.5f} "
                         f"(qty={executed_qty:.6f}, order_id={order_id})"
@@ -1631,71 +1669,51 @@ class FuturesTracker:
             else:
                 logger.error(f"Gagal eksekusi pending order untuk {symbol} pada attempt {attempt+1}")
                 time.sleep(self.ORDER_RETRY_DELAY)
-        
-        # Jika semua percobaan gagal
         logger.error(f"Gagal eksekusi pending order untuk {symbol} setelah {max_retries} percobaan")
         self.pending_orders.discard(order_id_db)
 
     def _vbot_pending_order_executor(self):
-        """Thread untuk eksekusi pending order (status=2)"""
         while not self.shutdown_event.is_set():
             try:
-                # Ambil semua pending order dari database
                 pending_orders = self._vbot_get_pending_orders()
                 current_time = datetime.utcnow()
-                
                 for order in pending_orders:
                     order_id_db = order['id']
                     symbol = order['symbol']
                     target_price = float(order['price_open'])
                     position = order['posisi']
-                    score = order['signal_score']  # Tidak digunakan di sini, hanya untuk informasi
-                    
-                    # Hindari memproses order yang sama berulang kali dalam satu iterasi
+                    score = order['signal_score']
                     if order_id_db in self.pending_orders:
                         continue
-                        
                     self.pending_orders.add(order_id_db)
                     
-                    # Pastikan simbol masih aktif
                     with self.reload_lock:
                         if symbol not in self.symbols:
                             logger.info(f"Pending order {symbol} tidak aktif, skip")
                             self.pending_orders.discard(order_id_db)
                             continue
                     
-                    # Dapatkan harga mark saat ini
                     with self.data_lock:
                         current_price = self.mark_prices.get(symbol, 0.0)
-                    
-                    # Jika harga saat ini nol, lewati
                     if current_price == 0.0:
                         continue
                     
-                    # Cek apakah harga saat ini sudah mencapai target (dalam toleransi 0.1%)
                     price_diff = abs(current_price - target_price)
-                    tolerance = target_price * 0.001  # 0.1%
-                    
+                    tolerance = target_price * 0.001
                     if price_diff <= tolerance:
                         logger.info(f"Pending order untuk {symbol} mencapai harga target. Target: {target_price}, Current: {current_price}, Diff: {price_diff:.5f}")
-                        # Eksekusi order
                         self._vbot_execute_pending_order(symbol, position, target_price, order_id_db)
                     else:
-                        # Hapus dari set pending_orders agar bisa dicoba lagi di iterasi berikutnya
                         self.pending_orders.discard(order_id_db)
-                
-                # Tunggu sebentar sebelum cek lagi
                 time.sleep(1)
             except Exception as e:
                 logger.error(f"Error pada pending executor: {e}")
                 time.sleep(5)
 
     def _vbot_has_pending_order(self, symbol: str) -> bool:
-        """Cek apakah ada pending order untuk simbol ini (status=2)"""
         conn = self._vbot_get_db_connection()
         if not conn:
             return False
-            
         try:
             cursor = conn.cursor()
             cursor.execute("SELECT COUNT(*) FROM view_td WHERE symbol = ? AND status = 2", (symbol,))
@@ -1708,100 +1726,67 @@ class FuturesTracker:
             conn.close()
 
     def _vbot_validate_market_conditions(self, symbol: str) -> bool:
-        """Validasi kondisi pasar sebelum eksekusi trading"""
         with self.data_lock:
             order_book = self.order_books.get(symbol, {})
             mark_price = self.mark_prices.get(symbol, 0.0)
-            
-        # Cek ketersediaan data order book
         if not order_book.get('bids') or not order_book.get('asks'):
             logger.info(f"Validasi pasar {symbol} gagal: data order book tidak lengkap")
             return False
             
-        # Hitung spread
         bid_price = float(order_book['bids'][0][0])
         ask_price = float(order_book['asks'][0][0])
         spread = ask_price - bid_price
         mid_price = (bid_price + ask_price) / 2
         spread_percent = spread / mid_price
-        
-        # Dapatkan spread threshold dari cache
         spread_threshold = self.spread_threshold_cache.get(symbol, 0.002)
-        
         if spread_percent > spread_threshold:
             logger.info(f"Validasi pasar {symbol} gagal: spread {spread_percent:.4%} > threshold {spread_threshold:.4%}")
             return False
             
-        # Validasi depth
-        depth_threshold_value = mark_price * 0.001  # 0.1% dari harga
+        depth_threshold_value = mark_price * 0.001
         valid_depth = True
-        
-        # Cek 5 level teratas di bids
         for level in order_book['bids'][:5]:
             price, qty = float(level[0]), float(level[1])
             if price * qty < depth_threshold_value:
                 valid_depth = False
                 break
-                
-        # Cek 5 level teratas di asks
         if valid_depth:
             for level in order_book['asks'][:5]:
                 price, qty = float(level[0]), float(level[1])
                 if price * qty < depth_threshold_value:
                     valid_depth = False
                     break
-                    
         if not valid_depth:
             logger.info(f"Validasi pasar {symbol} gagal: depth tidak memadai")
             return False
-            
         return True
 
     def _vbot_trading_signal_monitor(self):
-        """Thread untuk memantau sinyal trading dan memasukkan ke antrian trading"""
         while not self.shutdown_event.is_set():
-            time.sleep(1)  # Cek lebih sering
-            
-            # Buat salinan simbol untuk menghindari perubahan selama iterasi
+            time.sleep(1)
             with self.reload_lock:
                 symbols = self.symbols.copy()
-                
             for symbol in symbols:
                 try:
-                    # Dapatkan data terbaru dari database
                     with self.reload_lock:
                         db_info = self.symbol_info_db.get(symbol, {})
                         price_open = db_info.get('price_open', 0.0)
                         posisi = db_info.get('posisi', '')
                         signal_score = db_info.get('signal_score', 0)
-                    
-                    # Jika tidak ada sinyal atau price_open tidak valid, lewati
                     if signal_score == 0 or price_open <= 0:
                         continue
-                        
-                    # Dapatkan harga mark terbaru
                     with self.data_lock:
                         mark_price = self.mark_prices.get(symbol, 0.0)
-                    
-                    # Jika mark_price tidak valid, lewati
                     if mark_price <= 0:
                         continue
-                    
-                    # Periksa apakah sudah ada posisi terbuka
                     with self.position_lock:
                         if symbol in self.open_positions:
                             continue
-                    
-                    # Periksa apakah ada pending order
                     if self._vbot_has_pending_order(symbol):
                         continue
-                    
-                    # Validasi kondisi pasar (spread dan depth)
                     if not self._vbot_validate_market_conditions(symbol):
                         logger.info(f"Kondisi pasar tidak memenuhi untuk {symbol}, skip trading")
                         continue
-                    
-                    # Tentukan arah trading hanya untuk sinyal yang valid
                     trigger = False
                     if posisi == "LONG" and mark_price <= price_open:
                         trigger = True
@@ -1809,12 +1794,9 @@ class FuturesTracker:
                     elif posisi == "SHORT" and mark_price >= price_open:
                         trigger = True
                         action = "SHORT"
-                    
                     if trigger:
                         logger.info(f"SignalMonitor: Trigger {action} untuk {symbol}: MarkPrice={mark_price:.5f} vs PriceOpen={price_open:.5f}")
-                        # Masukkan ke trading queue untuk eksekusi
                         self.trading_queue.put((symbol, action, mark_price))
-                        
                 except Exception as e:
                     logger.error(f"Error pada trading signal monitor untuk {symbol}: {e}")
 
@@ -1823,13 +1805,12 @@ class FuturesTracker:
         stdscr.nodelay(True)
         curses.start_color()
         curses.use_default_colors()
-        curses.init_pair(1, curses.COLOR_GREEN, -1)    # Hijau
-        curses.init_pair(2, curses.COLOR_YELLOW, -1)   # Kuning
-        curses.init_pair(3, curses.COLOR_RED, -1)      # Merah
-        curses.init_pair(4, curses.COLOR_CYAN, -1)     # Cyan
-        curses.init_pair(5, curses.COLOR_MAGENTA, -1)  # Magenta
-        curses.init_pair(6, curses.COLOR_WHITE, -1)    # Putih
-        # Header dengan kolom tambahan untuk Entry Price
+        curses.init_pair(1, curses.COLOR_GREEN, -1)
+        curses.init_pair(2, curses.COLOR_YELLOW, -1)
+        curses.init_pair(3, curses.COLOR_RED, -1)
+        curses.init_pair(4, curses.COLOR_CYAN, -1)
+        curses.init_pair(5, curses.COLOR_MAGENTA, -1)
+        curses.init_pair(6, curses.COLOR_WHITE, -1)
         headers = ["Symbol", "LastP", "MarkP", "PriceOpen", "REC.SIGN", "Real.SIGN", "EntryP", "Leverage", "UnrealPnL", "RealPnL", "OrderID"]
         min_col_widths = [8, 11, 11, 11, 12, 10, 11, 8, 12, 12, 15]
         col_padding = 1
@@ -1838,7 +1819,6 @@ class FuturesTracker:
 
         while not self.shutdown_event.is_set():
             try:
-                # Handle keyboard input
                 c = stdscr.getch()
                 if c == ord('q'):
                     self.shutdown_event.set()
@@ -1848,7 +1828,6 @@ class FuturesTracker:
                     status = "AKTIF" if self.trading_active else "NONAKTIF"
                     logger.info(f"Trading diubah menjadi {status}")
                 elif c == ord('p'):
-                    # Tampilkan jumlah posisi terbuka
                     with self.position_lock:
                         open_count = len(self.open_positions)
                     logger.info(f"Jumlah posisi terbuka saat ini: {open_count}/{self.MAX_OPEN_POSITIONS}")
@@ -1863,19 +1842,14 @@ class FuturesTracker:
                 win = curses.newwin(height, width, 0, 0)
                 win.nodelay(True)
                 win.erase()
-                
-                # Hitung lebar kolom dinamis
                 total_min_width = sum(min_col_widths) + (len(min_col_widths) - 1) * col_padding
                 col_widths = min_col_widths.copy()
-                
                 if width > total_min_width:
                     extra_width = width - total_min_width
                     extra_per_col = extra_width // len(col_widths)
                     remainder = extra_width % len(col_widths)
-                    
                     for i in range(len(col_widths)):
                         col_widths[i] += extra_per_col
-                    
                     for i in range(remainder):
                         col_widths[i] += 1
 
@@ -1885,59 +1859,39 @@ class FuturesTracker:
                 title = f"Binance Futures Realtime - {now.strftime('%Y-%m-%d %H:%M:%S')} UTC | Mode: {self.MARGIN_MODE} | Leverage: {self.LEVERAGE}x | Balance: {self.total_balance:.2f} USDT | Used Margin: {self.used_margin:.2f} USDT | Trading: {'AKTIF' if self.trading_active else 'NONAKTIF'} | Open Positions: {open_count}/{self.MAX_OPEN_POSITIONS}"
                 title_x = max(0, (width - len(title)) // 2)
                 win.addstr(0, title_x, title, curses.A_BOLD | curses.color_pair(4))
-                
-                # Tampilkan header
                 col_start = 1
                 for i, h in enumerate(headers):
                     if col_start >= width - 1:
                         break
-                    
                     padded_header = f" {h} ".ljust(col_widths[i] + col_padding)
                     win.addstr(2, col_start, padded_header[:col_widths[i] + col_padding], 
                               curses.A_UNDERLINE | curses.color_pair(4))
                     col_start += col_widths[i] + col_padding
 
-                # Kumpulkan semua simbol dengan signal_score bukan 0
                 non_zero_signals = []
                 for symbol in self.symbols:
                     signal_score = self.symbol_info_db.get(symbol, {}).get('signal_score', 0)
                     if signal_score != 0:
                         non_zero_signals.append(symbol)
-                
-                # Kumpulkan simbol dengan posisi terbuka
                 open_symbols = []
                 with self.position_lock:
                     open_symbols = [s for s in self.symbols if s in self.open_positions]
-                
-                # Tentukan simbol yang akan ditampilkan
                 if non_zero_signals:
-                    # Tampilkan simbol dengan signal_score bukan 0 + semua posisi terbuka
                     display_symbols = list(set(non_zero_signals + open_symbols))
                 else:
-                    # Tampilkan semua simbol
                     display_symbols = self.symbols.copy()
-                
-                # Urutkan: posisi terbuka di atas, kemudian simbol lainnya
                 display_symbols.sort(key=lambda s: (s not in open_symbols, s))
-                
-                # Tampilkan data untuk setiap simbol
                 row = 3
                 for symbol in display_symbols:
                     if row >= height - 2:
                         break
-                    
                     with self.data_lock:
                         last_price = self.last_prices.get(symbol, 0.0)
                         mark_price = self.mark_prices.get(symbol, 0.0)
                         d = self.display_data.get(symbol, {})
-                        current_oi = d.get('open_interest', 0)
-                        previous_oi_val = self.previous_oi.get(symbol, 0)
                         funding_rate = d.get('funding_rate', 0)
                         liq = self.liquidation_accumulator.get(symbol, {})
-                        # PERBAIKAN: Menggunakan volume_accumulator yang benar
                         vol = self.volume_accumulator.get(symbol, {})
-                    
-                    # Dapatkan data dari database
                     with self.reload_lock:
                         db_info = self.symbol_info_db.get(symbol, {})
                     price_open = db_info.get('price_open', 0.0)
@@ -1946,18 +1900,13 @@ class FuturesTracker:
                     signal_score = db_info.get('signal_score', 0)
                     signal_ch = db_info.get('signal_ch', '')
                     signal_realtime = f"{posisi_ch} {signal_ch}"
-                    # Format sinyal untuk ditampilkan
                     signal_str = f"{posisi}({signal_score})"
-                    
-                    # Tentukan warna berdasarkan posisi
                     if posisi == "LONG":
-                        signal_color = 1  # Hijau
+                        signal_color = 1
                     elif posisi == "SHORT":
-                        signal_color = 3  # Merah
+                        signal_color = 3
                     else:
-                        signal_color = 6  # Putih
-                    
-                    # Dapatkan posisi saat ini
+                        signal_color = 6
                     position_display = ""
                     entry_price_display = ""
                     leverage_display = ""
@@ -1966,7 +1915,6 @@ class FuturesTracker:
                     order_id_display = ""
                     unrealized_pnl = 0.0
                     realized_pnl = 0.0
-                    
                     with self.position_lock:
                         if symbol in self.open_positions:
                             position, entry_price, qty, leverage, order_id, upnl, trade_id, _, _ = self.open_positions[symbol]
@@ -1975,9 +1923,7 @@ class FuturesTracker:
                             leverage_display = f"{leverage}x"
                             unrealized_pnl = upnl
                             unrealized_pnl_display = f"${upnl:.2f}"
-                            order_id_display = order_id[:12]  # Tampilkan 12 karakter pertama
-                            
-                            # Dapatkan realized PnL dari cache atau database
+                            order_id_display = order_id[:12]
                             if trade_id in self.pnl_real_cache:
                                 realized_pnl = self.pnl_real_cache[trade_id]
                             else:
@@ -1994,37 +1940,30 @@ class FuturesTracker:
                                         logger.error(f"Gagal mengambil realized PnL untuk {symbol}: {e}")
                                     finally:
                                         conn.close()
-                            
                             realized_pnl_display = f"${realized_pnl:.2f}"
 
-                    # Format data untuk ditampilkan
                     data_to_display = [
                         symbol,
                         f"{last_price:.5f}",
                         f"{mark_price:.5f}",
                         f"{price_open:.5f}",
                         signal_str,
-                        signal_realtime,  # Gunakan data dari database
+                        signal_realtime,
                         entry_price_display,
                         leverage_display,
                         unrealized_pnl_display,
                         realized_pnl_display,
                         order_id_display
                     ]
-                    
-                    # Tampilkan baris data
                     col_start = 1
                     for i, val in enumerate(data_to_display):
                         if col_start >= width - 1:
                             break
-                        
                         padded_val = f" {val} "
                         display_val = padded_val[:col_widths[i] + col_padding].ljust(col_widths[i] + col_padding)
-                        
-                        # Warna khusus untuk kolom tertentu
-                        if i == 4:  # Kolom REC.SIGN
+                        if i == 4:
                             win.addstr(row, col_start, display_val, curses.color_pair(signal_color))
-                        elif i == 8:  # Kolom UnrealPnL
+                        elif i == 8:
                             if unrealized_pnl >= self.PROFIT_TARGET:
                                 win.addstr(row, col_start, display_val, curses.color_pair(1))
                             elif unrealized_pnl > 0:
@@ -2033,7 +1972,7 @@ class FuturesTracker:
                                 win.addstr(row, col_start, display_val, curses.color_pair(3))
                             else:
                                 win.addstr(row, col_start, display_val, curses.color_pair(6))
-                        elif i == 9:  # Kolom RealPnL
+                        elif i == 9:
                             if realized_pnl > 0:
                                 win.addstr(row, col_start, display_val, curses.color_pair(1))
                             elif realized_pnl < 0:
@@ -2042,24 +1981,19 @@ class FuturesTracker:
                                 win.addstr(row, col_start, display_val, curses.color_pair(6))
                         else:
                             win.addstr(row, col_start, display_val, curses.color_pair(6))
-                            
                         col_start += col_widths[i] + col_padding
                     row += 1
 
-                # Tampilkan footer sederhana
                 footer = f"Menampilkan {min(len(display_symbols), row-3)} dari {len(display_symbols)} simbol | Open: {len(open_symbols)} | Tekan 'q' untuk keluar | 't' untuk toggle trading | 'p' untuk cek posisi"
                 footer_x = max(0, (width - len(footer)) // 2)
                 if height > 1:
                     win.addstr(height - 1, footer_x, footer, curses.A_DIM)
-                
                 win.noutrefresh()
                 curses.doupdate()
-
             except curses.error: 
                 pass
             except Exception as e: 
                 logger.error(f"Error pada loop display: {e}")
-
 
     def run(self):
         os.system('cls' if os.name == 'nt' else 'clear')
@@ -2068,12 +2002,11 @@ class FuturesTracker:
         self._vbot_load_symbol_list()
         self._vbot_initialize_data_structures()
         self._vbot_initialize_order_books()
-        self._vbot_get_account_balance()  # Dapatkan saldo akun
-        self._vbot_get_position_risk()    # Dapatkan margin yang digunakan
-        self._vbot_load_open_positions()  # Muat posisi terbuka dari database
+        self._vbot_get_account_balance()
+        self._vbot_get_position_risk()
+        self._vbot_load_open_positions()
 
         print("Memulai thread-thread pekerja...")
-        # Pisahkan koneksi WebSocket untuk setiap stream
         stream_configs = [
             ('Liquidation', self.LIQUIDATION_WS_URL, self._vbot_handle_liquidation_stream),
             ('MarkPrice', self.MARK_PRICE_WS_URL, self._vbot_handle_mark_price_stream),
@@ -2096,7 +2029,6 @@ class FuturesTracker:
             threading.Thread(target=self._vbot_trading_signal_monitor, name="TradingSignalMonitor", daemon=True),
         ]
 
-        # Tambahkan thread untuk setiap stream config
         for name, url, handler in stream_configs:
             threads.append(threading.Thread(
                 target=self._vbot_websocket_connector, 
