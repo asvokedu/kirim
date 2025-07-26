@@ -1755,10 +1755,8 @@ class SignalDetector:
             logger.info(f"Received close order request: {data}")
 
             # Validasi data
-            required_fields = ['order_id', 'symbol']
-            for field in required_fields:
-                if field not in data:
-                    return jsonify({'success': False, 'msg': f'Missing field: {field}'}), 400
+            if 'order_id' not in data or 'symbol' not in data:
+                return jsonify({'success': False, 'msg': 'Missing required fields'}), 400
 
             symbol = data['symbol']
             order_id = data['order_id']
@@ -1766,7 +1764,7 @@ class SignalDetector:
             # Dapatkan informasi posisi dari database
             position_info = self._get_position_info(order_id)
             if not position_info:
-                return jsonify({'success': False, 'msg': 'Position not found'}), 404
+                return jsonify({'success': False, 'msg': 'Active position not found'}), 404
 
             # Tutup posisi di Binance
             close_result = self._close_binance_position(
@@ -1785,21 +1783,15 @@ class SignalDetector:
                 close_price=close_result['price']
             )
 
-            if not update_success:
-                logger.warning("Posisi Binance berhasil ditutup tetapi gagal memperbarui database")
-
-            # Refresh data setelah perubahan
-            self._refresh_open_orders_cache()
-
             return jsonify({
                 'success': True,
-                'message': f"Position closed successfully @ {close_result['price']}",
-                'order_id': order_id
+                'message': f"Position closed @ {close_result['price']}",
+                'price': close_result['price']
             })
 
         except Exception as e:
-            logger.error(f"Error closing order: {str(e)}")
-            return jsonify({'success': False, 'msg': str(e)}), 500
+            logger.error(f"Error in close_order: {str(e)}")
+            return jsonify({'success': False, 'msg': 'Internal server error'}), 500
 
     def _get_position_info(self, order_id: str) -> Optional[Dict]:
         """Dapatkan informasi posisi dari database dan konversi BUY/SELL ke LONG/SHORT"""
@@ -1840,27 +1832,30 @@ class SignalDetector:
                 conn.close()
 
     def _close_binance_position(self, symbol: str, position_side: str, quantity: float) -> Dict:
-        """Tutup posisi di Binance Futures"""
+        """Tutup posisi di Binance Futures dengan benar"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
             return {'success': False, 'msg': 'Binance credentials not configured'}
 
         # Tentukan sisi order yang berlawanan
         if position_side.upper() == 'LONG':
             side = 'SELL'
+            position_side = 'LONG'  # Untuk parameter positionSide
         elif position_side.upper() == 'SHORT':
             side = 'BUY'
+            position_side = 'SHORT'
         else:
             return {'success': False, 'msg': 'Invalid position side'}
 
         try:
-            # Buat order penutupan
+            # PERBAIKAN: Gunakan parameter yang benar untuk Binance
             params = {
                 'symbol': symbol,
                 'side': side,
+                'positionSide': position_side,  # Penting untuk futures
                 'type': 'MARKET',
                 'quantity': quantity,
                 'timestamp': int(time.time() * 1000),
-                'reduceOnly': 'true'  # Pastikan hanya mengurangi posisi yang ada
+                'reduceOnly': 'true'  # Pastikan hanya mengurangi posisi
             }
 
             # Generate signature
@@ -1880,7 +1875,7 @@ class SignalDetector:
             if 'fills' in order_data and len(order_data['fills']) > 0:
                 price = float(order_data['fills'][0]['price'])
             else:
-                price = float(order_data['avgPrice'])
+                price = float(order_data.get('avgPrice', 0))
 
             logger.info(f"Position closed successfully: {order_data}")
             return {
@@ -1890,8 +1885,13 @@ class SignalDetector:
             }
 
         except Exception as e:
-            logger.error(f"Error closing Binance position: {e}")
-            return {'success': False, 'msg': str(e)}
+            # Tangkap error spesifik dari Binance
+            try:
+                error_msg = response.json().get('msg', str(e))
+            except:
+                error_msg = str(e)
+            logger.error(f"Error closing Binance position: {error_msg}")
+            return {'success': False, 'msg': error_msg}
 
     def _update_order_status(self, order_id: str, status: int, close_price: float) -> bool:
         """Perbarui status order di database"""
