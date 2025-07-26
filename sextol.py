@@ -1962,33 +1962,33 @@ class SignalDetector:
             return {'success': False, 'msg': f'Unexpected error: {str(e)}'}
 
     def _update_order_status(self, order_id: str, status: int, close_price: float) -> bool:
-    """Perbarui status order dengan transaksi yang aman"""
-    with self.db_semaphore:
-        conn = self._get_db_connection()
-        if not conn:
-            return False
-
-        try:
-            # Gunakan transaksi untuk memastikan konsistensi
-            conn.autocommit = False
-            cursor = conn.cursor()
-            
-            # Update order status
-            cursor.execute("""
-                UPDATE tran_order
-                SET status = ?, price_close = ?, close_time = ?
-                WHERE binance_order_id = ?
-            """, (status, close_price, datetime.utcnow(), order_id))
-            
-            conn.commit()
-            return cursor.rowcount > 0
-        except Exception as e:
-            logger.error(f"Error updating order status: {e}")
-            conn.rollback()
-            return False
-        finally:
-            conn.autocommit = True
-            conn.close()
+        """Perbarui status order dengan transaksi yang aman"""
+        with self.db_semaphore:
+            conn = self._get_db_connection()
+            if not conn:
+                return False
+    
+            try:
+                # Gunakan transaksi untuk memastikan konsistensi
+                conn.autocommit = False
+                cursor = conn.cursor()
+                
+                # Update order status
+                cursor.execute("""
+                    UPDATE tran_order
+                    SET status = ?, price_close = ?, close_time = ?
+                    WHERE binance_order_id = ?
+                """, (status, close_price, datetime.utcnow(), order_id))
+                
+                conn.commit()
+                return cursor.rowcount > 0
+            except Exception as e:
+                logger.error(f"Error updating order status: {e}")
+                conn.rollback()
+                return False
+            finally:
+                conn.autocommit = True
+                conn.close()
 
     def _refresh_open_orders_cache(self):
         """Refresh open orders cache setelah perubahan"""
