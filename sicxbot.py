@@ -1802,42 +1802,42 @@ class SignalDetector:
             return jsonify({'success': False, 'msg': str(e)}), 500
 
     def _get_position_info(self, order_id: str) -> Optional[Dict]:
-    """Dapatkan informasi posisi dari database dan konversi BUY/SELL ke LONG/SHORT"""
-    with self.db_semaphore:
-        conn = self._get_db_connection()
-        if not conn:
-            return None
+        """Dapatkan informasi posisi dari database dan konversi BUY/SELL ke LONG/SHORT"""
+        with self.db_semaphore:
+            conn = self._get_db_connection()
+            if not conn:
+                return None
 
-        try:
-            cursor = conn.cursor()
-            cursor.execute("""
-                SELECT symbol, posisi, qty
-                FROM tran_order
-                WHERE binance_order_id = ? AND status = 1
-            """, (order_id,))
-            row = cursor.fetchone()
+            try:
+                cursor = conn.cursor()
+                cursor.execute("""
+                    SELECT symbol, posisi, qty
+                    FROM tran_order
+                    WHERE binance_order_id = ? AND status = 1
+                """, (order_id,))
+                row = cursor.fetchone()
 
-            if row:
-                posisi_asli = row.posisi.upper()
-                # Konversi posisi
-                if posisi_asli == 'BUY':
-                    posisi_konversi = 'LONG'
-                elif posisi_asli == 'SELL':
-                    posisi_konversi = 'SHORT'
-                else:
-                    posisi_konversi = posisi_asli  # fallback jika nilai tidak sesuai
+                if row:
+                    posisi_asli = row.posisi.upper()
+                    # Konversi posisi
+                    if posisi_asli == 'BUY':
+                        posisi_konversi = 'LONG'
+                    elif posisi_asli == 'SELL':
+                        posisi_konversi = 'SHORT'
+                    else:
+                        posisi_konversi = posisi_asli  # fallback jika nilai tidak sesuai
 
-                return {
-                    'symbol': row.symbol,
-                    'position_side': posisi_konversi,
-                    'quantity': float(row.qty)
-                }
-            return None
-        except Exception as e:
-            logger.error(f"Error getting position info: {e}")
-            return None
-        finally:
-            conn.close()
+                    return {
+                        'symbol': row.symbol,
+                        'position_side': posisi_konversi,
+                        'quantity': float(row.qty)
+                    }
+                return None
+            except Exception as e:
+                logger.error(f"Error getting position info: {e}")
+                return None
+            finally:
+                conn.close()
 
     def _close_binance_position(self, symbol: str, position_side: str, quantity: float) -> Dict:
         """Tutup posisi di Binance Futures"""
