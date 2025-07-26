@@ -1818,7 +1818,7 @@ class SignalDetector:
                 row = cursor.fetchone()
 
                 if row:
-                    posisi_asli = row[1]
+                    posisi_asli = row.posisi.upper()
                     # Konversi posisi
                     if posisi_asli == 'BUY':
                         posisi_konversi = 'Long'
@@ -1828,9 +1828,9 @@ class SignalDetector:
                         posisi_konversi = posisi_asli  # fallback jika nilai tidak sesuai
 
                     return {
-                        'symbol': row[0],
+                        'symbol': row.symbol,
                         'position_side': posisi_konversi,
-                        'quantity': float(row[2])
+                        'quantity': float(row.qty)
                     }
                 return None
             except Exception as e:
