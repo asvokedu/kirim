@@ -1829,6 +1829,7 @@ class SignalDetector:
                 'side': side,
                 'type': 'MARKET',
                 'quantity': quantity,
+                'reduceOnly': 'true',
                 'timestamp': int(time.time() * 1000)
             }
 
