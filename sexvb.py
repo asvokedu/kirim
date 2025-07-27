@@ -1810,11 +1810,10 @@ class SignalDetector:
                 conn.close()
 
     def _close_binance_position(self, symbol: str, position_side: str, quantity: float) -> Dict:
-        """Tutup posisi di Binance Futures dengan benar"""
+        """Tutup posisi di Binance Futures"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
             return {'success': False, 'msg': 'Binance credentials not configured'}
 
-        # Tentukan sisi order berdasarkan posisi
         if position_side.upper() == "LONG":
             side = "SELL"
         elif position_side.upper() == "SHORT":
@@ -1823,20 +1822,20 @@ class SignalDetector:
             return {'success': False, 'msg': 'Invalid position side'}
 
         try:
-            # Gunakan parameter reduceOnly untuk menutup posisi
             params = {
-                'symbol': symbol,
+                'symbol': symbol.upper(),
                 'side': side,
                 'type': 'MARKET',
                 'quantity': quantity,
-                'reduceOnly': 'true',
+                'reduceOnly': True,
+                'recvWindow': 5000,
                 'timestamp': int(time.time() * 1000)
             }
 
-            # Generate signature
+            # Signature
             params['signature'] = self._generate_signature(params)
-
             headers = {"X-MBX-APIKEY": self.BINANCE_API_KEY}
+
             response = requests.post(
                 "https://fapi.binance.com/fapi/v1/order",
                 params=params,
@@ -1846,16 +1845,13 @@ class SignalDetector:
             response.raise_for_status()
             order_data = response.json()
 
-            # Dapatkan harga eksekusi
-            if 'fills' in order_data and len(order_data['fills']) > 0:
-                price = float(order_data['fills'][0]['price'])
-            else:
-                price = float(order_data.get('avgPrice', 0))
+            # Ambil harga dari field `avgFillPrice` atau gunakan `price`
+            executed_price = float(order_data.get('avgFillPrice') or order_data.get('price') or 0.0)
 
             logger.info(f"Position closed successfully: {order_data}")
             return {
                 'success': True,
-                'price': price,
+                'price': executed_price,
                 'data': order_data
             }
 
@@ -1867,9 +1863,11 @@ class SignalDetector:
                 error_msg = str(e)
             logger.error(f"Binance API error: {error_msg}")
             return {'success': False, 'msg': error_msg}
+
         except Exception as e:
             logger.error(f"Unexpected error: {str(e)}")
             return {'success': False, 'msg': str(e)}
+
 
     def _update_order_status(self, order_id: str, status: int, close_price: float) -> bool:
         """Perbarui status order dengan transaksi yang aman"""
