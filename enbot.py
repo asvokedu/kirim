@@ -1749,8 +1749,8 @@ class SignalDetector:
                         price,
                         1,  # Status: Active
                         side.upper(),
-                        stop_loss,
-                        take_profit,
+                        0,
+                        0,
                         datetime.utcnow(),
                         quantity,
                         leverage,
