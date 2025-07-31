@@ -1558,38 +1558,36 @@ class SignalDetector:
                         buy_liq_usd = liquidation_buy * mark_price
                         sell_liq_usd = liquidation_sell * mark_price
 
-                        if score >= 6:
-                            if score == 6:
-                                if buy_liq_usd < sell_liq_usd:
-                                    signal = "LONG"
-                                elif buy_liq_usd > sell_liq_usd:
-                                    signal = "SHORT"
-                                else:
-                                    signal = "HOLD"
-                            else:  # score > 6
-                                if buy_liq_usd > sell_liq_usd:
-                                    signal = "LONG"
-                                elif buy_liq_usd < sell_liq_usd:
-                                    signal = "SHORT"
-                                else:  # Keduanya 0
-                                    signal = "SHORT"
-                        elif score >= -6:
-                            if score == -6:
-                                if buy_liq_usd < sell_liq_usd:
-                                    signal = "SHORT"
-                                elif buy_liq_usd > sell_liq_usd:
-                                    signal = "LONG"
-                                else:
-                                    signal = "HOLD"
-                            else:  # score < -6
-                                if buy_liq_usd > sell_liq_usd:
-                                    signal = "SHORT"
-                                elif buy_liq_usd < sell_liq_usd:
-                                    signal = "LONG"
-                                else:  # Keduanya 0
-                                    signal = "LONG"
-                        else:
-                            signal = "HOLD"
+                        if score == 6:
+                            if buy_liq_usd < sell_liq_usd:
+                                signal = "LONG"
+                            elif buy_liq_usd > sell_liq_usd:
+                                signal = "SHORT"
+
+                        # CASE score > 6
+                        elif score > 6:
+                            if buy_liq_usd > sell_liq_usd:
+                                signal = "LONG"
+                            elif buy_liq_usd < sell_liq_usd:
+                                signal = "SHORT"
+                            elif buy_liq_usd == 0 and sell_liq_usd == 0:
+                                signal = "SHORT"
+
+                        # CASE score == -6
+                        elif score == -6:
+                            if buy_liq_usd < sell_liq_usd:
+                                signal = "SHORT"
+                            elif buy_liq_usd > sell_liq_usd:
+                                signal = "LONG"
+
+                        # CASE score < -6
+                        elif score < -6:
+                            if buy_liq_usd > sell_liq_usd:
+                                signal = "SHORT"
+                            elif buy_liq_usd < sell_liq_usd:
+                                signal = "LONG"
+                            elif buy_liq_usd == 0 and sell_liq_usd == 0:
+                                signal = "LONG"
                         # ===== END SISTEM SKORING =====
                         # === UPDATE TABEL T_Aset ===
                         # Update hanya jika sinyal atau skor berubah
