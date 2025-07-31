@@ -1573,7 +1573,7 @@ class SignalDetector:
                                     signal = "SHORT"
                                 else:  # Keduanya 0
                                     signal = "SHORT"
-                        elif score <= -6:
+                        elif score >= -6:
                             if score == -6:
                                 if buy_liq_usd < sell_liq_usd:
                                     signal = "SHORT"
