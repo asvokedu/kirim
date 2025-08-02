@@ -235,7 +235,7 @@ class SignalDetector:
         self.flask_app.add_url_rule('/api/close_order', 'close_order', self.close_order, methods=['POST'])
         # Konfigurasi Auto Close berdasarkan PnL
         self.flask_app.add_url_rule('/api/cancel_order', 'cancel_order', self.cancel_order, methods=['POST'])
-        self.AUTO_CLOSE_THRESHOLD_LOSS = -0.8  # USD
+        self.AUTO_CLOSE_THRESHOLD_LOSS = -0.3  # USD
         self.AUTO_CLOSE_THRESHOLD_PROFIT = 0.6  # USD
         self.auto_close_lock = threading.Lock()
         self.orders_in_process = set()  # Untuk melacak order yang sedang diproses
@@ -356,10 +356,10 @@ class SignalDetector:
         # Hitung harga entry berdasarkan posisi
         if position == 'LONG':
             # LONG: harga pasar - 0.1%
-            entry_price = mark_price * 0.999
+            entry_price = mark_price * 0.99999
         else:
             # SHORT: harga pasar + 0.1%
-            entry_price = mark_price * 1.001
+            entry_price = mark_price * 1.00001
 
         # Sesuaikan dengan tick size
         if tick_size > 0:
