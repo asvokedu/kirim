@@ -1708,22 +1708,18 @@ class SignalDetector:
                             signal = "HOLD"  # Tidak memenuhi kriteria pemrosesan
                         else:
                             # Logika sinyal berdasarkan score dan rasio likuidasi
-                            if score == 6 and buy_liq_usd > sell_liq_usd and sell_liq_usd != 0:
+                            if score == 6 and buy_liq_usd > sell_liq_usd:
                                 signal = "SHORT"
-                            elif score == 6 and buy_liq_usd > sell_liq_usd and sell_liq_usd == 0:
+
+                            elif score == -6 and buy_liq_usd > sell_liq_usd:
                                 signal = "LONG"
-                            elif score == -6 and buy_liq_usd > sell_liq_usd and sell_liq_usd != 0:
+
+                            elif score > 6 and buy_liq_usd < sell_liq_usd:
+                                signal = "SHORT"
+
+                            elif score < -6 and buy_liq_usd < sell_liq_usd:
                                 signal = "LONG"
-                            elif score == -6 and buy_liq_usd > sell_liq_usd and sell_liq_usd == 0:
-                                signal = "SHORT"
-                            elif score > 6 and buy_liq_usd < sell_liq_usd and buy_liq_usd != 0:
-                                signal = "SHORT"
-                            elif score > 6 and buy_liq_usd < sell_liq_usd and buy_liq_usd == 0:
-                                signal = "LONG"    
-                            elif score < -6 and buy_liq_usd < sell_liq_usd and buy_liq_usd != 0:
-                                signal = "LONG"
-                            elif score < -6 and buy_liq_usd < sell_liq_usd and buy_liq_usd == 0:
-                                signal = "SHORT"
+
                             else:
                                 signal = "HOLD"
                         # ===== END SISTEM SKORING =====
