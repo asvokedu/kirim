@@ -1704,24 +1704,32 @@ class SignalDetector:
                         buy_liq_usd = liquidation_buy * mark_price
                         sell_liq_usd = liquidation_sell * mark_price
 
-                        if score not in [-6, 6] and abs(score) <= 6:
-                            signal = "HOLD"  # Tidak memenuhi kriteria pemrosesan
+                        if abs(score) < 6:
+                            signal = "HOLD"
+
                         else:
-                            # Logika sinyal berdasarkan score dan rasio likuidasi
-                            if score == 6 and buy_liq_usd > sell_liq_usd:
-                                signal = "SHORT"
+                            buy_dominant = buy_liq_usd > sell_liq_usd
+                            sell_dominant = sell_liq_usd > buy_liq_usd
 
-                            elif score == -6 and buy_liq_usd > sell_liq_usd:
-                                signal = "LONG"
+                            if score > 6:
+                                if sell_dominant:
+                                    signal = "SHORT"
+                                elif buy_liq_usd == 0:
+                                    signal = "LONG"
+                                else:
+                                    signal = "HOLD"
 
-                            elif score > 6 and buy_liq_usd < sell_liq_usd:
-                                signal = "SHORT"
-
-                            elif score < -6 and buy_liq_usd < sell_liq_usd:
-                                signal = "LONG"
+                            elif score < -6:
+                                if buy_dominant:
+                                    signal = "LONG"
+                                elif sell_liq_usd == 0:
+                                    signal = "SHORT"
+                                else:
+                                    signal = "HOLD"
 
                             else:
                                 signal = "HOLD"
+
                         # ===== END SISTEM SKORING =====
                         # === UPDATE TABEL T_Aset ===
                         # Update hanya jika sinyal atau skor berubah
