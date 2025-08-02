@@ -451,23 +451,28 @@ class SignalDetector:
                 if mark_price == 0.0:
                     continue
                     
-                # Hitung profit saat ini
+                # Hitung profit saat ini (dalam USD)
                 if position == 'LONG':
                     current_profit = (mark_price - open_price) * quantity
                 else:  # SHORT
                     current_profit = (open_price - mark_price) * quantity
                 
+                # PERBAIKAN: Hitung profit sebagai persentase
+                investment = open_price * quantity
+                current_profit_pct = (current_profit / investment) * 100 if investment > 0 else 0
+                
                 # Jika mencapai target minimum, mulai trailing
-                if current_profit >= self.AUTOBOT_MIN_TARGET_PROFIT:
+                if current_profit_pct >= self.AUTOBOT_MIN_TARGET_PROFIT:
                     # Update profit maksimum jika melebihi
-                    if current_profit > max_profit:
+                    if current_profit_pct > max_profit:
                         with self.auto_close_lock:
-                            self.autobot_trailing_stops[binance_order_id]['max_profit'] = current_profit
-                        max_profit = current_profit
-                        logger.info(f"Trailing stop: Profit baru {max_profit:.4f} untuk {binance_order_id}")
+                            self.autobot_trailing_stops[binance_order_id]['max_profit'] = current_profit_pct
+                        max_profit = current_profit_pct
+                        logger.info(f"Trailing stop: Profit baru {max_profit:.2f}% untuk {binance_order_id}")
                     
                     # Cek apakah turun dari max profit melebihi trailing distance
-                    if current_profit <= max_profit - self.AUTOBOT_TRAILING_DISTANCE:
+                    # PERBAIKAN: Gunakan persentase untuk trailing
+                    if current_profit_pct <= max_profit - self.AUTOBOT_TRAILING_DISTANCE:
                         logger.info(f"Trailing stop dipicu! Menutup posisi {binance_order_id}")
                         self._close_autobot_position(binance_order_id, mark_price)
                         break
@@ -2223,7 +2228,6 @@ class SignalDetector:
             }), 500
 
     def _get_position_info(self, binance_order_id: str) -> Optional[Dict]:
-        """Dapatkan informasi posisi dengan konversi yang aman"""
         with self.db_semaphore:
             conn = self._get_db_connection()
             if not conn:
@@ -2232,7 +2236,7 @@ class SignalDetector:
             try:
                 cursor = conn.cursor()
                 cursor.execute("""
-                    SELECT symbol, posisi, qty, binance_order_id
+                    SELECT symbol, posisi, qty, price_open
                     FROM tran_order
                     WHERE binance_order_id = ? AND status = 1
                 """, (binance_order_id,))
@@ -2241,22 +2245,18 @@ class SignalDetector:
                 if not row:
                     return None
 
-                # Konversi quantity dengan penanganan error
+                # Validasi data
                 try:
                     quantity = float(row.qty)
-                except (TypeError, ValueError) as e:
-                    logger.error(f"Invalid quantity format: {row.qty} - {str(e)}")
-                    return None
-
-                if quantity <= 0:
-                    logger.error(f"Invalid quantity: {quantity}")
+                    open_price = float(row.price_open)
+                except (TypeError, ValueError):
                     return None
 
                 return {
                     'symbol': row.symbol,
-                    'position_side': row.posisi.strip().upper(),
+                    'position_side': row.posisi,
                     'quantity': quantity,
-                    'binance_order_id': row.binance_order_id
+                    'open_price': open_price
                 }
             except Exception as e:
                 logger.error(f"Error in _get_position_info: {e}")
@@ -2372,25 +2372,29 @@ class SignalDetector:
         self.socketio.emit('open_orders_update', self.open_orders_cache, namespace='/')
 
     def _pnl_monitor(self):
+        """Monitor untuk menutup posisi secara otomatis berdasarkan kerugian"""
         while not self.shutdown_event.is_set():
             try:
                 time.sleep(3)
                 with self.data_lock:
                     mark_prices = self.mark_prices.copy()
 
+                # Ambil data order terbuka
                 orders_data = self._fetch_open_orders_data()
-                if orders_data['status'] != 'success':
+                if orders_data.get('status') != 'success':
                     continue
 
-                for order in orders_data['data']:
-                    if order['status'] != 1:  # Skip non-active orders
+                for order in orders_data.get('data', []):
+                    if order.get('status') != 1:  # Skip non-active orders
                         continue
 
-                    symbol = order['symbol']
-                    order_id = order['binance_order_id']
-
-                    # Skip jika harga buka belum terisi
-                    if order['price_open'] <= 0:
+                    symbol = order.get('symbol')
+                    order_id = order.get('binance_order_id')
+                    open_price = float(order.get('price_open', 0))
+                    quantity = float(order.get('qty', 0))
+                    position = order.get('posisi')
+                    
+                    if not symbol or not order_id or open_price <= 0 or quantity <= 0:
                         continue
 
                     # Dapatkan harga mark terbaru
@@ -2398,14 +2402,18 @@ class SignalDetector:
                     if not current_price:
                         continue
 
-                    # HITUNG UNREALIZED LOSS (STOP LOSS)
-                    if order['posisi'] == 'LONG':
-                        loss = (order['price_open'] - current_price) * order['qty']
+                    # PERBAIKAN: Hitung loss yang akurat dengan biaya
+                    if position == 'LONG':
+                        loss = (open_price - current_price) * quantity
                     else:  # SHORT
-                        loss = (current_price - order['price_open']) * order['qty']
-
-                    # Hanya proses STOP LOSS
-                    if loss >= abs(self.AUTO_CLOSE_THRESHOLD_LOSS):
+                        loss = (current_price - open_price) * quantity
+                    
+                    # PERBAIKAN: Tambahkan biaya (0.04% per sisi)
+                    fee = open_price * quantity * 0.0004
+                    total_loss = loss + fee
+                    
+                    # Hanya proses STOP LOSS jika loss melebihi threshold
+                    if total_loss >= abs(self.AUTO_CLOSE_THRESHOLD_LOSS):
                         with self.auto_close_lock:
                             if order_id in self.orders_in_process:
                                 continue
@@ -2415,6 +2423,7 @@ class SignalDetector:
                                 args=(order_id, current_price, "STOP LOSS"),
                                 daemon=True
                             ).start()
+                            logger.warning(f"Stop loss triggered for {order_id}: Loss={total_loss:.4f} USD")
             except Exception as e:
                 logger.error(f"Stop Loss Monitor error: {e}")
 
@@ -2433,7 +2442,7 @@ class SignalDetector:
         fee = order['price_open'] * order['qty'] * 0.0008
         return pnl - fee
 
-    def _close_position(self, order_id: str, current_price: float):
+    def _close_position(self, order_id: str, current_price: float, reason: str):
         try:
             # Dapatkan info posisi
             position_info = self._get_position_info(order_id)
@@ -2451,10 +2460,12 @@ class SignalDetector:
                 # Update database
                 self._update_order_status(
                     order_id=order_id,
-                    status=0,
+                    status=0,  # Closed
                     close_price=close_result['price']
                 )
-                logger.info(f"Auto-closed order {order_id} @ {close_result['price']}")
+                logger.info(f"Auto-closed order {order_id} @ {close_result['price']} ({reason})")
+            else:
+                logger.error(f"Failed to auto-close {order_id}: {close_result.get('msg')}")
         except Exception as e:
             logger.error(f"Auto close failed: {e}")
         finally:
