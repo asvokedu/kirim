@@ -304,7 +304,7 @@ class SignalDetector:
                 return False
 
         # --- Logika Perhitungan Kuantitas yang Diperbaiki ---
-        notional = 100.0  # Target notional 100 USDT
+        notional = 75.0  # Target notional 100 USDT
         initial_quantity = notional / mark_price
 
         min_qty = symbol_info.get('minQty', 0.0)
