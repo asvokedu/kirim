@@ -1610,13 +1610,11 @@ class SignalDetector:
                                 burst_sell += sell
 
                         # ===== SISTEM SKORING TRADING =====
-                        score = 0
-
                         if atr14 > 0 and atr2 > 0:
                             atr_ratio = atr2 / atr14
                             
                             # Volatilitas meningkat signifikan
-                            if atr_ratio > 1.5:
+                            if atr_ratio > 1.4:
                                 score += 2
                             # Volatilitas menurun signifikan
                             elif atr_ratio < 0.7:
