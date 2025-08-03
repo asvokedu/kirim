@@ -129,7 +129,7 @@ class SignalDetector:
         self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]]] = {}
 
         # === STRUKTUR DATA BARU UNTUK PENINGKATAN SINYAL ===
-        self.price_history: Dict[str, Deque[Tuple[datetime, float]] = {}
+        self.price_history: Dict[str, Deque[Tuple[datetime, float]]] = {}
         self.funding_history: Dict[str, Deque[float]] = {}
         self.atr_values: Dict[str, float] = {}  # Menyimpan nilai ATR14 terkini
 
