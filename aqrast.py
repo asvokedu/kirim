@@ -126,7 +126,7 @@ class SignalDetector:
         self.previous_oi: Dict[str, float] = {}
 
         # Menyimpan history likuidasi untuk perhitungan rata-rata
-        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]] = {}
+        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]]] = {}
 
         # === STRUKTUR DATA BARU UNTUK PENINGKATAN SINYAL ===
         self.price_history: Dict[str, Deque[Tuple[datetime, float]] = {}
