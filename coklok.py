@@ -278,7 +278,7 @@ class SignalDetector:
                 if row:
                     return {
                         'score_id': row.score_id,
-                        'recomendation_id': row.recomendation_id
+                        'recomendation_id': row.recomendasi_id
                     }
                 return None
             except Exception as e:
