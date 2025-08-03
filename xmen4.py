@@ -1610,6 +1610,7 @@ class SignalDetector:
                                 burst_sell += sell
 
                         # ===== SISTEM SKORING TRADING =====
+                        score = 0
                         if atr14 > 0 and atr2 > 0:
                             atr_ratio = atr2 / atr14
                             
