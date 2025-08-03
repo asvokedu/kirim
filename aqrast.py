@@ -126,10 +126,10 @@ class SignalDetector:
         self.previous_oi: Dict[str, float] = {}
 
         # Menyimpan history likuidasi untuk perhitungan rata-rata
-        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]]] = {}
+        self.liquidation_history: Dict[str, Deque[Tuple[datetime, float, float]] = {}
 
         # === STRUKTUR DATA BARU UNTUK PENINGKATAN SINYAL ===
-        self.price_history: Dict[str, Deque[Tuple[datetime, float]]] = {}
+        self.price_history: Dict[str, Deque[Tuple[datetime, float]] = {}
         self.funding_history: Dict[str, Deque[float]] = {}
         self.atr_values: Dict[str, float] = {}  # Menyimpan nilai ATR14 terkini
 
@@ -255,6 +255,37 @@ class SignalDetector:
         
         # Cache untuk melacak candle terakhir di mana autobot telah membuka posisi
         self.autobot_last_open: Dict[str, datetime] = {}
+        
+        # === PENAMBAHAN BARU UNTUK ASET INDICATOR ===
+        # Struktur data untuk menyimpan skor ASET
+        self.aset_scores: Dict[str, Dict[str, int]] = {}  # {symbol: {'score_id': int, 'recomendation_id': int}}
+        self.aset_cache_time: Dict[str, float] = {}  # Last update time per symbol
+        self.aset_cache_lock = threading.Lock()
+
+    # ===== FUNGSI BARU UNTUK ASET INDICATOR =====
+    def _fetch_aset_score(self, symbol: str) -> Optional[Dict[str, int]]:
+        """Mengambil skor ASET dari database menggunakan stored procedure"""
+        with self.db_semaphore:
+            conn = self._get_db_connection()
+            if not conn:
+                return None
+
+            try:
+                cursor = conn.cursor()
+                cursor.execute("EXEC sp_indicatorASET @symbol=?", symbol)
+                row = cursor.fetchone()
+
+                if row:
+                    return {
+                        'score_id': row.score_id,
+                        'recomendation_id': row.recomendation_id
+                    }
+                return None
+            except Exception as e:
+                logger.error(f"Gagal mengambil skor ASET untuk {symbol}: {e}")
+                return None
+            finally:
+                conn.close()
 
     @login_required
     def get_autobot_status(self):
@@ -842,7 +873,6 @@ class SignalDetector:
         except Exception as e:
             logger.error(f"Error saat mengambil informasi simbol: {e}")
 
-
     def _fetch_account_balance(self):
         """Mengambil dan meng-cache saldo akun Binance Futures"""
         if not self.BINANCE_API_KEY or not self.BINANCE_API_SECRET:
@@ -1229,6 +1259,9 @@ class SignalDetector:
                 # Inisialisasi data sinyal
                 self.last_signals[symbol] = 'HOLD'
                 self.current_scores[symbol] = 0
+                
+                # === INISIALISASI BARU UNTUK ASET INDICATOR ===
+                self.aset_scores[symbol] = {'score_id': 0, 'recomendation_id': 0}
         logger.info("Inisialisasi struktur data selesai.")
         self._refresh_signal_data()  # Muat data sinyal awal
 
@@ -1264,6 +1297,13 @@ class SignalDetector:
 
         oi_data = self._fetch_api_data(self.OPEN_INTEREST_URL, {"symbol": symbol})
         funding_data = self._fetch_api_data(self.PREMIUM_INDEX_URL, {"symbol": symbol})
+        
+        # === PERUBAHAN BARU: AMBIL SKOR ASET SETELAH CANDLE DITUTUP ===
+        aset_score = self._fetch_aset_score(symbol)
+        if aset_score:
+            with self.aset_cache_lock:
+                self.aset_scores[symbol] = aset_score
+                self.aset_cache_time[symbol] = time.time()
 
         with self.data_lock:
             # LOG VOLUME SEBELUM RESET
@@ -1579,6 +1619,9 @@ class SignalDetector:
                             current_candle_data = self.current_candle.get(symbol, {})
                             previous_candle_data = self.previous_candle.get(symbol, {})
                             atr14 = self.atr_values.get(symbol, 0.0)
+                            
+                            # === PERUBAHAN BARU: AMBIL SKOR ASET ===
+                            aset_score = self.aset_scores.get(symbol, {})
 
                         # Skip jika data tidak lengkap
                         if last_price == 0.0 or mark_price == 0.0:
@@ -1653,7 +1696,16 @@ class SignalDetector:
                         elif liq_buy_usd > buy_threshold:
                             score += 3
 
-                        # === PENINGKATAN: VOLUME BREAKOUT ===
+                        # === PENAMBAHAN BARU: INTEGRASI SKOR ASET ===
+                        aset_score_value = aset_score.get('score_id', 0)
+                        if aset_score_value > 0:
+                            # Skor positif menunjukkan sinyal bullish
+                            score += 2
+                        elif aset_score_value < 0:
+                            # Skor negatif menunjukkan sinyal bearish
+                            score -= 2
+
+                        # === VOLUME BREAKOUT ===
                         prev_volume = previous_candle_data.get('volume', 0) * mark_price
                         current_volume = current_candle_data.get('volume', 0) * mark_price
                         volume_breakout = False
@@ -1662,7 +1714,7 @@ class SignalDetector:
                             volume_breakout = True
                             score += 1  # Bonus untuk volume tinggi
 
-                        # === PENINGKATAN: HIGH/LOW BREAKOUT ===
+                        # === HIGH/LOW BREAKOUT ===
                         prev_high = previous_candle_data.get('high', 0)
                         prev_low = previous_candle_data.get('low', float('inf'))
                         current_high = current_candle_data.get('high', 0)
@@ -1673,7 +1725,7 @@ class SignalDetector:
                         if current_low < prev_low:
                             score += 1
 
-                        # === PENINGKATAN: DETEKSI ANOMALI BURST VOLUME + LIKUIDASI SIMULTAN ===
+                        # === DETEKSI ANOMALI BURST VOLUME + LIKUIDASI SIMULTAN ===
                         burst_sell_threshold = burst_threshold.get('burst_sell_threshold', 50000)
                         burst_buy_threshold = burst_threshold.get('burst_buy_threshold', 50000)
 
@@ -1797,7 +1849,7 @@ class SignalDetector:
         # Validasi quantity
         symbol_info = self.symbol_info_map.get(symbol)
         if not symbol_info:
-            logger.error(f"Informasi simbol {symbol} tidak ditemukan")
+            logger.error(f"Informasi simbol untuk {symbol} tidak ditemukan")
             return {'success': False, 'msg': 'Symbol info not found'}
 
         min_qty = symbol_info.get('minQty', 0)
@@ -2438,14 +2490,14 @@ class SignalDetector:
             position_info = self._get_position_info(order_id)
             if not position_info:
                 return
-
+            
             # Tutup di Binance
             close_result = self._close_binance_position(
                 symbol=position_info['symbol'],
                 position_side=position_info['position_side'],
                 quantity=position_info['quantity']
             )
-
+            
             if close_result['success']:
                 # Update database
                 self._update_order_status(
@@ -2674,6 +2726,10 @@ class SignalDetector:
         with self.signal_cache_lock:
             signal_cache = self.signal_data_cache.copy()
 
+        # Ambil data ASET scores
+        with self.aset_cache_lock:
+            aset_scores = self.aset_scores.copy()
+
         with self.data_lock:
             for symbol in self.symbols:
                 # Ambil data dari struktur internal
@@ -2685,6 +2741,9 @@ class SignalDetector:
 
                 # Ambil data sinyal dari cache database
                 signal_info = signal_cache.get(symbol, {})
+
+                # Ambil skor ASET
+                aset_score = aset_scores.get(symbol, {'score_id': 0, 'recomendation_id': 0})
 
                 # Ambil data realtime dengan lock
                 with self.signal_lock:
@@ -2707,6 +2766,8 @@ class SignalDetector:
                     'liquidation_sell': float(liq.get('sell', 0)) * mark_price if mark_price else 0,
                     'volume_buy': float(vol.get('market_buy', 0)) * mark_price if mark_price else 0,
                     'volume_sell': float(vol.get('market_sell', 0)) * mark_price if mark_price else 0,
+                    'aset_score_id': aset_score.get('score_id', 0),
+                    'aset_recomendation_id': aset_score.get('recomendation_id', 0),
                     'updated': True
                 }
                 assets.append(asset)
