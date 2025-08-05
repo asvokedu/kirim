@@ -1792,30 +1792,30 @@ class SignalDetector:
                             btc_index_val = self.btc_price_index
                             btc_recommendation = self.btc_recomendasi_btc
 
-                        if score >= 6 and recomendacion_id == "LONG" and btc_recommendation == "LONG" and btc_index_val >= 0.20 :  
+                        if score >= 6 and recomendacion_id == "LONG" and btc_recommendation == "LONG" and btc_index_val >= 0.01 :  
                             signal = "LONG"
-                        elif score >= 6 and recomendacion_id == "LONG" and btc_recommendation != "LONG" and btc_index_val >= 0.20 :  
+                        elif score >= 6 and recomendacion_id == "LONG" and btc_recommendation != "LONG" and btc_index_val >= 0.01 :  
                             signal = "LONG"
-                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation == "LONG" and btc_index_val >= 0.20 :  
+                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation == "LONG" and btc_index_val >= 0.01 :  
                             signal = "LONG"
-                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation != "LONG" and btc_index_val >= 0.20 :  
+                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation != "LONG" and btc_index_val >= 0.01 :  
                             signal = "LONG"
-                        elif score >= 6 and recomendacion_id == "LONG" and btc_recommendation == "LONG" and btc_index_val <= -0.10 :  
+                        elif score >= 6 and recomendacion_id == "LONG" and btc_recommendation == "LONG" and btc_index_val <= -0.01 :  
                             signal = "LONG"             
-                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation == "LONG" and btc_index_val <= -0.10 :  
+                        elif score >= 6 and recomendacion_id != "LONG" and btc_recommendation == "LONG" and btc_index_val <= -0.01 :  
                             signal = "LONG"
 
-                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation == "SHORT" and btc_index_val <= -0.10 :  
+                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation == "SHORT" and btc_index_val <= -0.01 :  
                             signal = "SHORT"
-                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation != "SHORT" and btc_index_val <= -0.10 :  
+                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation != "SHORT" and btc_index_val <= -0.01 :  
                             signal = "SHORT"
-                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation == "SHORT" and btc_index_val <= -0.10 :  
+                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation == "SHORT" and btc_index_val <= -0.01 :  
                             signal = "SHORT"
-                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation != "SHORT" and btc_index_val <= -0.10 :  
+                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation != "SHORT" and btc_index_val <= -0.01 :  
                             signal = "SHORT"
-                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation == "SHORT" and btc_index_val >= 0.20 :  
+                        elif score <= -6 and recomendacion_id == "SHORT" and btc_recommendation == "SHORT" and btc_index_val >= 0.01 :  
                             signal = "SHORT"             
-                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation == "SHORT" and btc_index_val >= 0.20 :  
+                        elif score <= -6 and recomendacion_id != "SHORT" and btc_recommendation == "SHORT" and btc_index_val >= 0.01 :  
                             signal = "LONG"
                         else:
                             signal = "HOLD"
