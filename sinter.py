@@ -1702,7 +1702,6 @@ class SignalDetector:
 
                         # ===== SISTEM SKORING TRADING =====
                         score = 0
-                        score += score_id
 
                         # 1. Perubahan Open Interest
                         if previous_oi_val > 0:
