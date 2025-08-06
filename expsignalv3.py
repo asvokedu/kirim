@@ -1792,6 +1792,8 @@ class SignalDetector:
                             btc_index_val = self.btc_price_index
                             btc_recommendation = self.btc_recomendasi_btc
 
+                        signal = 'HOLD'
+
                         if score >= 4 and recomendacion_id == "LONG":
                             if btc_recommendation == "LONG" and btc_index_val > 0.20:
                                 signal = "LONG"
