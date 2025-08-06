@@ -1740,11 +1740,6 @@ class SignalDetector:
                             score -= 1
                         
                         # 7. Konfirmasi BTC (Faktor Penting)
-                        with self.data_lock:
-                            indicator = self.indicator_data.get(symbol, {})
-                        score_id = indicator.get('score_id', 0)
-                        recomendacion_id = indicator.get('recomendacion_id', 'N/A')
-
                         if recomendacion_id == 'LONG':
                             score += 2
                         elif recomendacion_id == 'SHORT':
